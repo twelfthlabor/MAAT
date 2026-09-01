@@ -134,7 +134,7 @@ _AGE_PROFILES = {
         "scenarios_weight": {"voluntary_departure": 0.35, "runaway": 0.20, "accident": 0.15, "exploitation": 0.10, "abduction": 0.10, "custodial_dispute": 0.10},
     },
     "adult": {
-        "range": (26, 200),
+        "range": (26, 64),
         "profile": "Adult — full autonomy. Disappearance may be voluntary, related to personal crisis, or involve foul play.",
         "behavioral": [
             "Full independence and resources for travel.",
@@ -143,6 +143,18 @@ _AGE_PROFILES = {
             "May have chosen to disappear voluntarily.",
         ],
         "scenarios_weight": {"voluntary_departure": 0.40, "accident": 0.20, "foul_play": 0.20, "exploitation": 0.10, "abduction": 0.10},
+    },
+    "senior": {
+        "range": (65, 200),
+        "profile": "Senior — may have cognitive or medical vulnerabilities. Disappearance may involve disorientation, medical emergency, or voluntary travel with diminished situational awareness.",
+        "behavioral": [
+            "May have dementia, Alzheimer's, or other cognitive conditions.",
+            "Driving ability may be impaired — higher accident risk.",
+            "Likely has established routines — deviation is significant.",
+            "Medical needs may become urgent if separated from medication.",
+            "May be confused about location or unable to seek help.",
+        ],
+        "scenarios_weight": {"accident": 0.35, "voluntary_departure": 0.25, "medical_emergency": 0.20, "foul_play": 0.10, "exploitation": 0.10},
     },
 }
 
@@ -154,6 +166,7 @@ _SCENARIO_DESCRIPTIONS = {
     "voluntary_departure": "Subject chose to leave and is maintaining distance deliberately. May be in another city or staying off-grid.",
     "accident": "Subject may have been involved in an accident (wilderness, water, vehicle) and is unable to communicate.",
     "foul_play": "Evidence suggests possible criminal involvement in the disappearance.",
+    "medical_emergency": "Subject may be experiencing a medical or cognitive emergency and is unable to communicate or navigate home.",
 }
 
 
@@ -240,7 +253,26 @@ def _analyze_lead_evidence(
             signals["has_school_connection"] = True
         if "work" in text or "employed" in text or "linkedin" in text:
             signals["has_employment"] = True
-        if "seen" in text or "spotted" in text or "sighting" in text:
+        # "Last seen" is part of the official baseline and must not be
+        # counted as a new public sighting. Only explicit current-sighting
+        # language should influence scenario analysis and search areas.
+        current_sighting_terms = (
+            "spotted", "sighted", "reported seeing", "possibly seen",
+            "may have been seen", "believed to be seen", "unconfirmed sighting",
+        )
+        # A headline containing "spotted" is not enough on its own: broad
+        # first-name searches routinely return unrelated missing-person
+        # stories. Keep only reasonably case-linked candidates in scenario
+        # analysis; lower-confidence mentions remain available for review.
+        case_linked = (
+            lead.get("lead_type") == "sighting-trace"
+            or (
+                conf >= 0.6
+                and case_name.lower() in text
+                and (case_city or "").lower() in text
+            )
+        )
+        if case_linked and any(term in text for term in current_sighting_terms):
             signals["has_sightings"] = True
             signals["sighting_leads"].append(lead)
         if "search party" in text or "volunteer" in text:
@@ -257,6 +289,28 @@ def _analyze_lead_evidence(
 
     signals["source_diversity"] = list(signals["source_diversity"])
     return signals
+
+
+def _extract_sighting_locations(signals: dict[str, Any]) -> list[str]:
+    """Extract unique sighting-related location names from leads."""
+    locations: list[str] = []
+    seen = set()
+    for lead in signals.get("sighting_leads", []):
+        for r in lead.get("rationale", []):
+            r_str = str(r)
+            if (
+                "Machine-extracted sighting location" in r_str
+                or "Sighting location" in r_str
+                or "Title sighting location" in r_str
+            ):
+                # Extract city name after the colon
+                parts = r_str.split(":", 1)
+                if len(parts) == 2:
+                    city = parts[1].strip()
+                    if city.lower() not in seen:
+                        seen.add(city.lower())
+                        locations.append(city)
+    return locations
 
 
 def _build_scenarios(
@@ -311,10 +365,14 @@ def _build_scenarios(
 
         # ── Exploitation scenario ──
         elif scenario_name == "exploitation":
-            if case_age is not None and 13 <= case_age <= 17:
+            # Exploitation/grooming is primarily a concern for youth; suppress for seniors
+            if case_age is not None and case_age >= 65:
+                evidence_against.append(f"Age {case_age} — exploitation/grooming is not a primary concern for seniors.")
+                weight_adjustment -= 0.15
+            elif case_age is not None and 13 <= case_age <= 17:
                 evidence_for.append(f"Age {case_age} is in a vulnerable demographic for exploitation.")
                 weight_adjustment += 0.05
-            if signals["has_social_profiles"]:
+            if signals["has_social_profiles"] and (case_age is None or case_age < 65):
                 evidence_for.append("Active social media presence — potential grooming vector.")
                 weight_adjustment += 0.03
             if signals["has_travel_indicators"]:
@@ -361,12 +419,19 @@ def _build_scenarios(
             if case_age is not None and case_age >= 16:
                 evidence_for.append(f"Age {case_age} — capable of deliberate independent departure.")
                 weight_adjustment += 0.03
-            if signals["has_employment"]:
+            if signals["has_employment"] and (case_age is None or case_age < 65):
                 evidence_for.append("Employment indicators found — may have financial means to sustain departure.")
                 weight_adjustment += 0.05
             if not signals["has_sightings"]:
                 evidence_for.append("No public sightings reported — consistent with deliberate avoidance.")
                 weight_adjustment += 0.03
+            if signals["has_sightings"]:
+                evidence_against.append("Public sightings reported — not typical of someone deliberately hiding.")
+                weight_adjustment -= 0.05
+            # Seniors are less likely to voluntarily disappear
+            if case_age is not None and case_age >= 65:
+                evidence_against.append(f"Age {case_age} — seniors rarely depart voluntarily without informing family.")
+                weight_adjustment -= 0.10
 
         # ── Accident ──
         elif scenario_name == "accident":
@@ -375,6 +440,24 @@ def _build_scenarios(
                 if ct == "highway":
                     evidence_for.append(f"Proximity to highway infrastructure — vehicle accident risk.")
                     weight_adjustment += 0.02
+            if case_age is not None and case_age >= 70:
+                evidence_for.append(f"Age {case_age} — elevated accident risk for elderly drivers.")
+                weight_adjustment += 0.05
+            if signals["has_sightings"] and signals["has_travel_indicators"]:
+                evidence_for.append("Active travel with sightings — subject is mobile but may become involved in a road incident.")
+                weight_adjustment += 0.03
+
+        # ── Medical emergency ──
+        elif scenario_name == "medical_emergency":
+            if case_age is not None and case_age >= 70:
+                evidence_for.append(f"Age {case_age} — elevated risk of cognitive or medical emergency.")
+                weight_adjustment += 0.05
+            if signals["has_sightings"]:
+                evidence_for.append("Sightings reported — subject is mobile but may be disoriented.")
+                weight_adjustment += 0.05
+            if signals["has_travel_indicators"]:
+                evidence_for.append("Travel indicators suggest subject is moving — may be driving while confused.")
+                weight_adjustment += 0.05
 
         # ── Foul play ──
         elif scenario_name == "foul_play":
@@ -430,8 +513,14 @@ def _build_geographic_assessment(
         if dist is not None and dist < 150:
             infrastructure.append(f"{ct}: {label} ({dist:.0f} km)")
 
-    # Determine probable zone based on primary scenario
-    if "Runaway" in primary:
+    # Determine probable zone based on sighting data and primary scenario
+    sighting_locs = _extract_sighting_locations(signals)
+    if sighting_locs:
+        # Sighting data overrides scenario-based guessing
+        loc_str = ", ".join(sighting_locs[:5])
+        zone = f"Unverified sighting report(s) mention: {loc_str}. Verify each source before comparing corridors with {case_city or 'the last known location'}."
+        confidence = "high" if len(sighting_locs) >= 2 else "medium"
+    elif "Runaway" in primary:
         if signals["has_travel_indicators"]:
             zone = f"Likely beyond {case_city or 'origin'} — travel indicators suggest inter-city movement. Check bus stations, shelters, and friends' addresses in nearby cities."
             confidence = "medium"
@@ -450,6 +539,9 @@ def _build_geographic_assessment(
     elif "Abduction" in primary:
         zone = "Immediate area and transit corridors should be priority. Time-sensitive — widening search radius is critical."
         confidence = "low"
+    elif "Medical Emergency" in primary:
+        zone = f"Subject may be stranded or disoriented along travel route from {case_city or 'origin'}. Check hospitals, care facilities, and roadside stops. Alert local pharmacies if medication needs are known."
+        confidence = "medium"
     else:
         zone = f"Insufficient evidence to narrow geographic probability. Focus on {case_city or case_province or 'the reported area'} and expand based on new leads."
         confidence = "low"
@@ -503,9 +595,19 @@ def _build_conclusion(
     search_areas: list[str] = []
     if case_city:
         search_areas.append(f"{case_city} and immediate surroundings (last known location)")
+    # Add sighting-derived locations to search areas
+    sighting_locations = _extract_sighting_locations(signals)
+    if sighting_locations:
+        search_areas.append(f"Unverified reported sighting area(s): {', '.join(sighting_locations[:5])}")
     if signals["has_travel_indicators"]:
-        search_areas.append("Bus stations, transit hubs, and highway rest stops within 200 km")
-    search_areas.append("Youth shelters and outreach services in the province")
+        search_areas.append("Highway rest stops, gas stations, and transit hubs along the travel route")
+    # Age-appropriate shelter recommendations
+    if case_age is not None and case_age >= 65:
+        search_areas.append("Hospitals, care facilities, and senior services in the region")
+    elif case_age is not None and case_age < 18:
+        search_areas.append("Youth shelters and outreach services in the province")
+    else:
+        search_areas.append("Shelters, hospitals, and outreach services in the province")
     for geo in (geo_assessment.nearby_infrastructure or [])[:3]:
         search_areas.append(f"Near {geo}")
 

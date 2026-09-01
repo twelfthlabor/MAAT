@@ -99,3 +99,48 @@ def test_build_news_query_plan_stays_news_focused_and_bounded():
     assert any("missing" in query or "last seen" in query for query in queries)
     assert any('"Wynford Dr & Concorde Pl, Toronto, ON"' in query for query in queries)
     assert any('"2026"' in query for query in queries)
+
+
+def test_quebec_query_plans_add_localized_terms_and_authority_pivots():
+    context = QueryContext(
+        case_id=8181,
+        name="Rosalie Naess-Leclerc",
+        aliases=[],
+        city="Levis",
+        province="Quebec",
+        age=17,
+        missing_since=datetime(2026, 4, 21, tzinfo=timezone.utc),
+        location_text="Levis, QC",
+        authority_name="Levis City Police Service",
+    )
+
+    public_queries = build_public_query_plan(context, limit=12)
+    news_queries = build_news_query_plan(context, limit=8)
+
+    assert any("fugue" in query or "disparition" in query for query in public_queries)
+    assert any('"Levis City Police Service"' in query for query in public_queries)
+    assert any("fugue" in query or "disparition" in query for query in news_queries)
+    assert any('"Levis City Police Service"' in query for query in news_queries)
+
+
+def test_single_name_queries_are_case_anchored_before_generic_sweeps():
+    context = QueryContext(
+        case_id=8453,
+        name="Joshua",
+        aliases=[],
+        city="Victoria",
+        province="British Columbia",
+        age=15,
+        missing_since=datetime(2026, 7, 10, tzinfo=timezone.utc),
+        location_text="Kings Road, Victoria, BC",
+        authority_name="Victoria Police Department",
+    )
+
+    public_queries = build_public_query_plan(context, limit=6)
+    news_queries = build_news_query_plan(context, limit=6)
+
+    assert public_queries
+    assert news_queries
+    assert all("Joshua" in query for query in public_queries[:3])
+    assert any('"Victoria"' in query or '"Kings Road, Victoria, BC"' in query for query in public_queries[:3])
+    assert any('"Victoria"' in query or '"Kings Road, Victoria, BC"' in query for query in news_queries[:3])

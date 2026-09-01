@@ -4,9 +4,14 @@
    ═══════════════════════════════════════════════════════════ */
 
 // ─── Configuration ───
+const IS_LOCAL_HOST = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+
 const CONFIG = {
-  // Backend API — try Render hosted backend first, then localhost for dev
-  API_URLS: ["https://maat-backend-yzu6.onrender.com", "http://localhost:8000", "http://127.0.0.1:8000"],
+  // Vercel proxies the same-origin API to the long-running Render worker. Local
+  // development still prefers the local FastAPI process.
+  API_URLS: IS_LOCAL_HOST
+    ? ["http://127.0.0.1:8000", "http://localhost:8000", "https://maat-backend-yzu6.onrender.com"]
+    : [window.location.origin, "https://maat-backend-yzu6.onrender.com"],
   // ArcGIS direct feed for fallback
   ARCGIS_URL: "https://services.arcgis.com/Sv9ZXFjH5h1fYAaI/arcgis/rest/services/Missing_Children_Cases_View_Master/FeatureServer/0",
   // Bundled data fallback
@@ -36,7 +41,10 @@ const CONNECTORS = [
   { id: "bing-news-rss", name: "Bing News RSS", icon: "📡" },
   { id: "duckduckgo-html", name: "DuckDuckGo", icon: "🦆" },
   { id: "reddit-search", name: "Reddit Search", icon: "💬" },
-  { id: "wayback-machine", name: "Wayback Machine", icon: "🏛️" },
+  { id: "wayback-machine", name: "Wayback Machine", icon: "🕰️" },
+  { id: "arquivo-pt", name: "Arquivo.pt Archive", icon: "📚" },
+  { id: "sherlock", name: "Sherlock Username Sweep", icon: "🕵️" },
+  { id: "whatsmyname", name: "WhatsMyName Fingerprints", icon: "🪪" },
   { id: "gdelt-doc", name: "GDELT Doc API", icon: "🌐" },
   { id: "reverse-image-hook", name: "Reverse Image Search", icon: "🔍" },
   { id: "social-profiler", name: "Social Media Profiler", icon: "👤" },
@@ -57,6 +65,7 @@ const state = {
   runs: [],
   leads: [],
   queryLogs: [],
+  synthesis: null,
   view: "overview", // "overview" | "dossier"
   maps: {},
 };
@@ -64,6 +73,23 @@ const state = {
 // ─── DOM References ───
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
+
+function safeHttpUrl(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = new URL(value);
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function setMobileCasesOpen(open) {
+  $("#caseNav")?.classList.toggle("is-open", open);
+  $("#caseNavScrim")?.classList.toggle("is-open", open);
+  $("#mobileCasesBtn")?.setAttribute("aria-expanded", String(open));
+  document.body.classList.toggle("has-mobile-nav", open);
+}
 
 // ═══════════════════════════════════════════════════════════
 // API LAYER
@@ -172,8 +198,9 @@ function renderCaseList() {
     const isSelected = c.id === state.selectedCaseId;
     const badge = statusBadge(c.status);
     const elapsed = c.missing_since ? elapsedText(c.missing_since) : "";
-    const photoHtml = c.photo_url
-      ? `<img class="case-card__photo" src="${escHtml(c.photo_url)}" alt="${escHtml(c.name)}" loading="lazy">`
+    const photoUrl = safeHttpUrl(c.photo_url);
+    const photoHtml = photoUrl
+      ? `<img class="case-card__photo" src="${escHtml(photoUrl)}" alt="${escHtml(c.name)}" loading="lazy">`
       : `<div class="case-card__photo-placeholder">👤</div>`;
 
     return `
@@ -197,6 +224,14 @@ function renderCaseList() {
       const id = Number(card.dataset.caseId);
       selectCase(id);
     });
+  });
+  list.querySelectorAll("img.case-card__photo").forEach((img) => {
+    img.addEventListener("error", () => {
+      const fallback = document.createElement("div");
+      fallback.className = "case-card__photo-placeholder";
+      fallback.textContent = "👤";
+      img.replaceWith(fallback);
+    }, { once: true });
   });
 }
 
@@ -320,6 +355,7 @@ function renderConnectorDots() {
 // ═══════════════════════════════════════════════════════════
 
 async function selectCase(caseId) {
+  setMobileCasesOpen(false);
   state.selectedCaseId = caseId;
   state.selectedCase = state.cases.find((c) => c.id === caseId);
   state.selectedRunId = null;
@@ -329,16 +365,20 @@ async function selectCase(caseId) {
 
   // Switch view
   showView("dossier");
+  // Establish the initial tab before any network work begins. Previously this
+  // happened after asynchronous requests and could override a tab the analyst
+  // had already selected, most visibly on mobile.
+  switchTab("facts");
 
   // Render dossier header
   renderDossierHeader();
 
   // Load investigation data if API online
   if (state.apiOnline) {
-    loadCaseRuns(caseId);
-    
-    // Try to get full case data from API
-    const fullCase = await api(`/api/cases/${caseId}`);
+    const [fullCase] = await Promise.all([
+      api(`/api/cases/${caseId}`),
+      loadCaseRuns(caseId),
+    ]);
     if (fullCase) {
       state.selectedCase = { ...state.selectedCase, ...fullCase };
     }
@@ -353,8 +393,6 @@ async function selectCase(caseId) {
   // Update authority quick action
   updateQuickActions();
   
-  // Switch to facts tab
-  switchTab("facts");
 }
 
 function renderDossierHeader() {
@@ -363,9 +401,13 @@ function renderDossierHeader() {
 
   // Photo
   const photoEl = $("#dossierPhoto");
-  photoEl.innerHTML = c.photo_url
-    ? `<img src="${escHtml(c.photo_url)}" alt="${escHtml(c.name)}">`
+  const photoUrl = safeHttpUrl(c.photo_url);
+  photoEl.innerHTML = photoUrl
+    ? `<img src="${escHtml(photoUrl)}" alt="${escHtml(c.name)}">`
     : '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:24px;color:var(--text-muted)">👤</div>';
+  photoEl.querySelector("img")?.addEventListener("error", () => {
+    photoEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:24px;color:var(--text-muted)">👤</div>';
+  }, { once: true });
 
   // Status badge
   const statusEl = $("#dossierStatus");
@@ -456,12 +498,14 @@ async function loadCaseRuns(caseId) {
 
   // Auto-select latest run
   if (state.runs.length) {
-    selectRun(state.runs[0].id);
+    await selectRun(state.runs[0].id);
   } else {
     state.leads = [];
     state.queryLogs = [];
+    state.synthesis = null;
     renderLeads();
     renderQueryLog();
+    generateAssessment();
     $("#leadCountBadge").textContent = "0";
   }
 }
@@ -495,14 +539,16 @@ async function selectRun(runId) {
   // Highlight
   $$(".run-item").forEach((el) => el.classList.toggle("is-selected", Number(el.dataset.runId) === runId));
 
-  // Load leads + query logs in parallel
-  const [leadsData, queryData] = await Promise.all([
+  // Load leads, query logs, and backend synthesis in parallel.
+  const [leadsData, queryData, synthesisData] = await Promise.all([
     api(`/api/investigations/runs/${runId}/leads?limit=200`),
     api(`/api/investigations/runs/${runId}/query-logs`),
+    api(`/api/investigations/runs/${runId}/synthesis`),
   ]);
 
   state.leads = leadsData?.leads || [];
   state.queryLogs = queryData?.query_logs || [];
+  state.synthesis = synthesisData || null;
 
   $("#leadCountBadge").textContent = String(state.leads.length);
   
@@ -510,6 +556,7 @@ async function selectRun(runId) {
   renderQueryLog();
   populateLeadSourceFilter();
   renderTimeline();
+  generateAssessment();
 }
 
 // ─── Leads ───
@@ -522,9 +569,14 @@ function renderLeads() {
   let filtered = state.leads.filter((l) => l.confidence >= minConf);
   if (sourceFilter) filtered = filtered.filter((l) => l.source_name === sourceFilter);
   if (reviewFilter) filtered = filtered.filter((l) => l.review_status === reviewFilter);
+  filtered.sort((a, b) => {
+    const actionDelta = (b.analysis?.actionability_score || 0) - (a.analysis?.actionability_score || 0);
+    return actionDelta || (b.confidence || 0) - (a.confidence || 0);
+  });
 
   const summary = $("#leadsSummary");
-  summary.textContent = `${filtered.length} of ${state.leads.length} leads`;
+  const candidateCount = filtered.filter((l) => l.analysis?.is_location_candidate).length;
+  summary.textContent = `${filtered.length} results · ${candidateCount} location candidate${candidateCount === 1 ? "" : "s"}`;
 
   if (!filtered.length) {
     container.innerHTML = '<div class="empty-state"><p>No leads match current filters.</p></div>';
@@ -538,13 +590,16 @@ function renderLeads() {
     const circumference = 2 * Math.PI * 22;
     const dashOffset = circumference - (conf * circumference);
 
-    const reviewed = l.reviewed;
     const approveActive = l.review_status === "credible" ? " is-active--approve" : "";
     const rejectActive = l.review_status === "not-relevant" ? " is-active--reject" : "";
+    const analysis = l.analysis || {};
+    const actionability = analysis.actionability_score || 0;
+    const actionTier = analysis.actionability_label || "low";
+    const extracted = (analysis.extracted_details || []).slice(0, 4);
 
     return `
       <div class="lead-card lead-card--${tier} animate-in" style="animation-delay:${Math.min(i * 30, 600)}ms" data-lead-id="${l.id}">
-        <div class="confidence-meter">
+        <div class="confidence-meter" title="Case relevance score, not sighting likelihood">
           <svg class="confidence-meter__ring" viewBox="0 0 48 48">
             <circle class="confidence-meter__bg" cx="24" cy="24" r="22"/>
             <circle class="confidence-meter__fill" cx="24" cy="24" r="22"
@@ -553,9 +608,13 @@ function renderLeads() {
               stroke-dashoffset="${dashOffset}"/>
           </svg>
           <span class="confidence-meter__value" style="color:${color}">${(conf * 100).toFixed(0)}</span>
+          <span class="confidence-meter__label">REL</span>
         </div>
         <div class="lead-card__body">
-          <div class="lead-card__title">${escHtml(l.title || "Untitled Lead")}</div>
+          <div class="lead-card__heading">
+            <div class="lead-card__title">${escHtml(l.title || "Untitled Lead")}</div>
+            <span class="actionability-pill actionability-pill--${actionTier}">${actionability} action</span>
+          </div>
           <div class="lead-card__source">
             ${escHtml(l.source_name || "")} · 
             ${l.source_url ? `<a href="${escHtml(l.source_url)}" target="_blank" rel="noopener">View source ↗</a>` : "No URL"}
@@ -564,11 +623,19 @@ function renderLeads() {
           ${l.summary ? `<div class="lead-card__excerpt">${escHtml(l.summary)}</div>` : ""}
           ${l.content_excerpt ? `<div class="lead-card__excerpt">${escHtml(l.content_excerpt)}</div>` : ""}
           <div class="lead-card__tags">
+            ${analysis.evidence_label ? `<span class="lead-tag lead-tag--evidence">${escHtml(analysis.evidence_label)}</span>` : ""}
+            ${analysis.verification_label ? `<span class="lead-tag lead-tag--verification-${escHtml(analysis.verification_state)}">${escHtml(analysis.verification_label)}</span>` : ""}
             ${l.category ? `<span class="lead-tag lead-tag--category">${escHtml(l.category)}</span>` : ""}
             ${l.source_kind ? `<span class="lead-tag lead-tag--source">${escHtml(l.source_kind)}</span>` : ""}
-            ${l.location_text ? `<span class="lead-tag">${escHtml(l.location_text)}</span>` : ""}
+            ${l.location_text ? `<span class="lead-tag">${escHtml(l.location_text)} · ${escHtml(analysis.location_precision || "area")}</span>` : ""}
             ${l.corroboration_count > 1 ? `<span class="lead-tag">×${l.corroboration_count} corroboration</span>` : ""}
           </div>
+          ${extracted.length ? `
+            <details class="lead-card__details">
+              <summary>Extracted locating details</summary>
+              <ul>${extracted.map((item) => `<li>${escHtml(item)}</li>`).join("")}</ul>
+            </details>` : ""}
+          ${analysis.next_step ? `<div class="lead-card__next"><strong>Next:</strong> ${escHtml(analysis.next_step)}</div>` : ""}
         </div>
         <div class="lead-card__actions">
           <button class="review-btn review-btn--approve${approveActive}" title="Mark credible" data-action="credible" data-lead-id="${l.id}">✓</button>
@@ -604,7 +671,7 @@ async function reviewLead(leadId, decision) {
     return;
   }
   const data = await api(`/api/investigations/leads/${leadId}/review`, {
-    method: "POST",
+    method: "PATCH",
     body: JSON.stringify({ decision, notes: null }),
   });
   if (data) {
@@ -613,8 +680,13 @@ async function reviewLead(leadId, decision) {
     if (lead) {
       lead.reviewed = true;
       lead.review_status = decision;
+      if (lead.analysis) {
+        lead.analysis.verification_state = decision === "credible" ? "analyst_reviewed" : "unverified";
+        lead.analysis.verification_label = decision === "credible" ? "Analyst reviewed" : "Unverified";
+      }
     }
     renderLeads();
+    generateAssessment();
     showToast(`Lead marked as ${decision}`, "success");
   }
 }
@@ -722,12 +794,11 @@ function generateAssessment() {
   $("#analysisEmpty").style.display = "none";
   $("#analysisContent").style.display = "";
 
-  renderSituationOverview(c, leads);
-  renderEvidenceMetricsSummary(leads);
-  renderLeadClusters(leads);
-  renderHypotheses(c, leads);
-  renderActionItems(c, leads);
-  renderAuthorityBrief(c, leads);
+  renderTriageSituation(c, leads);
+  renderTriageMetrics(leads);
+  renderLocationCandidates(leads);
+  renderTriageActions(c, leads);
+  renderTriageAuthorityBrief(c, leads);
 }
 
 function renderSituationOverview(c, leads) {
@@ -1073,6 +1144,205 @@ function renderAuthorityBrief(c, leads) {
 // MAPS
 // ═══════════════════════════════════════════════════════════
 
+function renderTriageSituation(c, leads) {
+  const days = c.missing_since ? daysSince(c.missing_since) : null;
+  const sources = [...new Set(leads.map((l) => l.source_name).filter(Boolean))];
+  const candidates = leads.filter((l) => l.analysis?.is_location_candidate);
+  const reviewedCandidates = candidates.filter((l) => l.review_status === "credible");
+  const preciseCandidates = candidates.filter((l) =>
+    ["address", "street", "neighbourhood", "street_or_landmark"].includes(l.analysis?.location_precision)
+  );
+
+  $("#analysisSituation").innerHTML = `
+    <p><strong>${escHtml(c.name)}</strong> has been missing${days !== null ? ` for <strong>${days} days</strong>` : ""} from
+    <strong>${escHtml([c.city, c.province].filter(Boolean).join(", ") || "an unknown location")}</strong>.
+    ${c.status ? `Status: <strong>${escHtml(STATUS_LABELS[(c.status || "").toLowerCase()] || c.status)}</strong>.` : ""}</p>
+    <p style="margin-top:8px">
+      This run returned <strong>${leads.length} public-source results</strong> from <strong>${sources.length} sources</strong>.
+      <strong>${candidates.length}</strong> contain a reported location; <strong>${preciseCandidates.length}</strong> are more precise than city level.
+    </p>
+    <p style="margin-top:8px">
+      <strong>${reviewedCandidates.length}</strong> location candidate${reviewedCandidates.length === 1 ? " has" : "s have"} been marked credible by an analyst.
+      All other places remain unverified and must not be treated as the person's current location.
+    </p>
+    ${c.authority_name ? `<p style="margin-top:8px">Investigating authority: <strong>${escHtml(c.authority_name)}</strong>${c.authority_phone ? ` | ${escHtml(c.authority_phone)}` : ""}</p>` : ""}`;
+}
+
+function renderTriageMetrics(leads) {
+  const candidates = leads.filter((l) => l.analysis?.is_location_candidate).length;
+  const actionable = leads.filter((l) => (l.analysis?.actionability_score || 0) >= 65).length;
+  const geocoded = leads.filter((l) => l.analysis?.is_location_candidate && l.analysis?.has_coordinates).length;
+  const reviewed = leads.filter((l) => l.review_status === "credible").length;
+  const contextOnly = leads.filter((l) => l.analysis?.evidence_type === "context_only").length;
+
+  $("#evidenceMetrics").innerHTML = `
+    <div class="evidence-metric">
+      <div class="evidence-metric__value">${leads.length}</div>
+      <div class="evidence-metric__label">Search Results</div>
+    </div>
+    <div class="evidence-metric evidence-metric--green">
+      <div class="evidence-metric__value">${candidates}</div>
+      <div class="evidence-metric__label">Location Candidates</div>
+    </div>
+    <div class="evidence-metric evidence-metric--teal">
+      <div class="evidence-metric__value">${actionable}</div>
+      <div class="evidence-metric__label">High Actionability</div>
+    </div>
+    <div class="evidence-metric">
+      <div class="evidence-metric__value">${geocoded}</div>
+      <div class="evidence-metric__label">Mapped Places</div>
+    </div>
+    <div class="evidence-metric">
+      <div class="evidence-metric__value">${reviewed}</div>
+      <div class="evidence-metric__label">Analyst Reviewed</div>
+    </div>
+    <div class="evidence-metric evidence-metric--red">
+      <div class="evidence-metric__value">${contextOnly}</div>
+      <div class="evidence-metric__label">Context Only</div>
+    </div>`;
+
+  const typeCounts = {};
+  leads.forEach((lead) => {
+    const label = lead.analysis?.evidence_label || "Unclassified";
+    typeCounts[label] = (typeCounts[label] || 0) + 1;
+  });
+  const sorted = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]);
+  const max = sorted[0]?.[1] || 1;
+  $("#evidenceBreakdown").innerHTML = sorted.map(([label, count], index) => `
+    <div class="evidence-bar">
+      <span class="evidence-bar__label">${escHtml(label)}</span>
+      <div class="evidence-bar__track">
+        <div class="evidence-bar__fill evidence-bar__fill--${["official", "news", "web", "other"][Math.min(index, 3)]}" style="width:${Math.round((count / max) * 100)}%"></div>
+      </div>
+      <span class="evidence-bar__count">${count}</span>
+    </div>`).join("");
+}
+
+function renderLocationCandidates(leads) {
+  const candidates = leads
+    .filter((l) => l.analysis?.is_location_candidate)
+    .sort((a, b) => (b.analysis?.actionability_score || 0) - (a.analysis?.actionability_score || 0));
+  const container = $("#locationCandidates");
+
+  if (!candidates.length) {
+    container.innerHTML = `
+      <div class="location-candidate-empty">
+        <strong>No new reported location survived extraction.</strong>
+        <span>The results currently provide awareness or case context, not a source-backed place to verify.</span>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = candidates.map((lead, index) => {
+    const analysis = lead.analysis || {};
+    const details = (analysis.extracted_details || []).slice(0, 5);
+    const tier = analysis.actionability_label || "low";
+    return `
+      <article class="location-candidate location-candidate--${tier}">
+        <div class="location-candidate__rank">${String(index + 1).padStart(2, "0")}</div>
+        <div class="location-candidate__body">
+          <div class="location-candidate__heading">
+            <div>
+              <div class="location-candidate__place">${escHtml(lead.location_text || "Reported place")}</div>
+              <div class="location-candidate__meta">
+                ${escHtml(analysis.verification_label || "Unverified")} | ${escHtml(analysis.location_precision || "unknown precision")} | ${escHtml(lead.source_name || "Unknown source")}
+              </div>
+            </div>
+            <div class="location-candidate__score">${analysis.actionability_score || 0}<span>action</span></div>
+          </div>
+          <div class="location-candidate__title">${escHtml(lead.title || "Untitled source result")}</div>
+          ${details.length ? `<ul class="location-candidate__details">${details.map((item) => `<li>${escHtml(item)}</li>`).join("")}</ul>` : ""}
+          <div class="location-candidate__next"><strong>Verify:</strong> ${escHtml(analysis.next_step || "Open the source and validate the reported place.")}</div>
+          ${lead.source_url ? `<a class="location-candidate__source" href="${escHtml(lead.source_url)}" target="_blank" rel="noopener noreferrer">Open source</a>` : ""}
+        </div>
+      </article>`;
+  }).join("");
+}
+
+function renderTriageActions(c, leads) {
+  const candidates = leads
+    .filter((l) => l.analysis?.is_location_candidate)
+    .sort((a, b) => (b.analysis?.actionability_score || 0) - (a.analysis?.actionability_score || 0));
+  const unreviewed = leads.filter((l) => !l.reviewed);
+  const items = [];
+
+  candidates.slice(0, 4).forEach((lead) => {
+    items.push({
+      priority: (lead.analysis?.actionability_score || 0) >= 65 ? "high" : "medium",
+      title: `Verify reported location: ${lead.location_text || "unspecified place"}`,
+      desc: `${lead.source_name || "Public source"}: ${lead.analysis?.next_step || "Open and validate the source details."}`,
+    });
+  });
+
+  if (!candidates.length) {
+    items.push({
+      priority: "medium",
+      title: "No source-backed location candidate yet",
+      desc: "Review the highest-actionability results for a date, place, vehicle, witness detail, or direction of travel before escalating anything.",
+    });
+  }
+  if (unreviewed.length) {
+    items.push({
+      priority: "medium",
+      title: `Triage ${unreviewed.length} unreviewed result${unreviewed.length === 1 ? "" : "s"}`,
+      desc: "Dismiss amplification and namesakes first, then preserve URLs and excerpts for results that add locating detail.",
+    });
+  }
+  if (c.authority_name) {
+    items.push({
+      priority: "high",
+      title: `Send credible details to ${c.authority_name}`,
+      desc: `Use the brief below${c.authority_phone ? ` and call ${c.authority_phone}` : ""}. Do not contact the subject, relatives, or witnesses directly.`,
+    });
+  }
+
+  $("#actionItems").innerHTML = items.map((item) => `
+    <div class="action-item">
+      <span class="action-item__priority action-item__priority--${item.priority}">${item.priority}</span>
+      <div class="action-item__body">
+        <div class="action-item__title">${escHtml(item.title)}</div>
+        <div class="action-item__desc">${escHtml(item.desc)}</div>
+      </div>
+    </div>`).join("");
+}
+
+function renderTriageAuthorityBrief(c, leads) {
+  const days = c.missing_since ? daysSince(c.missing_since) : null;
+  const candidates = leads
+    .filter((l) => l.analysis?.is_location_candidate)
+    .sort((a, b) => (b.analysis?.actionability_score || 0) - (a.analysis?.actionability_score || 0));
+  const reviewed = candidates.filter((l) => l.review_status === "credible");
+
+  let brief = "MAAT PUBLIC-SOURCE LOCATION BRIEF\n";
+  brief += `Generated: ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC\n`;
+  brief += "--------------------------------------------------\n\n";
+  brief += `SUBJECT: ${c.name || "Unknown"}\n`;
+  brief += `LAST KNOWN AREA: ${[c.city, c.province].filter(Boolean).join(", ") || "Unknown"}\n`;
+  if (c.missing_since) brief += `MISSING SINCE: ${formatDate(c.missing_since)}${days !== null ? ` (${days} days)` : ""}\n`;
+  if (c.authority_name) brief += `AUTHORITY: ${c.authority_name}${c.authority_phone ? ` | ${c.authority_phone}` : ""}\n`;
+  brief += `\nRESULTS REVIEWED BY SYSTEM: ${leads.length}\n`;
+  brief += `REPORTED LOCATION CANDIDATES: ${candidates.length}\n`;
+  brief += `MARKED CREDIBLE BY ANALYST: ${reviewed.length}\n`;
+
+  if (candidates.length) {
+    brief += "\nLOCATION CANDIDATES - VERIFY BEFORE USE\n";
+    brief += "--------------------------------------------------\n";
+    candidates.slice(0, 8).forEach((lead, index) => {
+      brief += `${index + 1}. ${lead.location_text || "Unspecified place"} [${lead.analysis?.verification_label || "Unverified"}]\n`;
+      brief += `   Actionability: ${lead.analysis?.actionability_score || 0}/100; precision: ${lead.analysis?.location_precision || "unknown"}\n`;
+      brief += `   Source: ${lead.source_name || "Unknown"} | ${lead.title || "Untitled"}\n`;
+      if (lead.source_url) brief += `   URL: ${lead.source_url}\n`;
+      (lead.analysis?.extracted_details || []).slice(0, 3).forEach((detail) => {
+        brief += `   - ${detail}\n`;
+      });
+    });
+  }
+
+  brief += "\nCAUTION: Machine-extracted locations are unverified public-source reports.\n";
+  brief += "They do not establish the person's current location. Preserve sources and report credible details to authorities.\n";
+  $("#briefOutput").textContent = brief;
+}
+
 function initOverviewMap() {
   const container = $("#overviewMap");
   if (!container || state.maps.overview) return;
@@ -1202,20 +1472,42 @@ function renderEvidenceMap() {
   if (c?.latitude && c?.longitude) bounds.push([c.latitude, c.longitude]);
 
   state.leads.forEach((l) => {
-    if (l.latitude && l.longitude) {
-      const conf = l.confidence || 0;
-      const color = conf >= 0.6 ? "#4ade80" : conf >= 0.3 ? "#f5a623" : "#64748b";
+    const analysis = l.analysis || {};
+    if (l.latitude && l.longitude && analysis.evidence_type !== "research_tool" && analysis.evidence_type !== "context_only") {
+      const actionability = analysis.actionability_score || 0;
+      const color = analysis.verification_state === "official_source" ? "#4ade80"
+        : analysis.verification_state === "analyst_reviewed" ? "#38bdf8" : "#f5a623";
+      const uncertaintyRadius = {
+        address: 250,
+        street: 750,
+        neighbourhood: 3000,
+        street_or_landmark: 1500,
+        city: 12000,
+        city_or_area: 15000,
+        area: 20000,
+      }[analysis.location_precision] || 12000;
+
+      L.circle([l.latitude, l.longitude], {
+        radius: uncertaintyRadius,
+        fillColor: color,
+        fillOpacity: 0.06,
+        color,
+        weight: 1,
+        opacity: 0.35,
+      }).addTo(map);
       
       L.circleMarker([l.latitude, l.longitude], {
-        radius: 6,
+        radius: analysis.is_location_candidate ? 7 : 5,
         fillColor: color,
-        fillOpacity: 0.7,
+        fillOpacity: 0.8,
         color: color,
-        weight: 1,
+        weight: 2,
       }).addTo(map).bindPopup(`
         <div style="min-width:180px;font-family:var(--font-body)">
-          <strong>${escHtml(l.title || "Lead")}</strong><br>
-          <span style="font-size:11px;opacity:0.8">${escHtml(l.source_name || "")} · ${((conf) * 100).toFixed(0)}% confidence</span>
+          <strong>${escHtml(l.location_text || l.title || "Mapped evidence")}</strong><br>
+          <span style="font-size:11px;opacity:0.8">${escHtml(analysis.evidence_label || "Location mention")} | ${escHtml(analysis.verification_label || "Unverified")}</span><br>
+          <span style="font-size:11px;opacity:0.8">${escHtml(analysis.location_precision || "area")} precision | ${actionability}/100 actionability</span><br>
+          <span style="font-size:11px;opacity:0.8">${escHtml(l.source_name || "Unknown source")}</span>
         </div>
       `);
       bounds.push([l.latitude, l.longitude]);
@@ -1230,6 +1522,25 @@ function renderEvidenceMap() {
 // ═══════════════════════════════════════════════════════════
 // INVESTIGATION ACTIONS
 // ═══════════════════════════════════════════════════════════
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function pollInvestigationRun(runId, caseId, timeoutMs = 8 * 60 * 1000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    await delay(2500);
+    const run = await api(`/api/investigations/runs/${runId}`);
+    if (!run) continue;
+    if (["completed", "completed_with_warnings", "failed"].includes(run.status)) {
+      return run;
+    }
+    if (state.selectedCaseId === caseId) {
+      const btn = $("#runInvestigationBtn");
+      btn.lastChild.textContent = run.status === "queued" ? " Queued…" : " Investigating…";
+    }
+  }
+  return null;
+}
 
 async function runInvestigation() {
   if (!state.apiOnline) {
@@ -1268,18 +1579,27 @@ async function runInvestigation() {
     console.error("Investigation error:", err);
   }
   
+  if (data) {
+    showToast(`Run #${data.run_id} queued — ${data.connectors?.length || 0} public-source methods scheduled.`, "info");
+    const completed = await pollInvestigationRun(data.run_id, state.selectedCaseId);
+    await loadCaseRuns(state.selectedCaseId);
+    if (!completed) {
+      showToast(`Run #${data.run_id} is still processing. It will remain in Run History.`, "warning");
+    } else if (completed.status === "failed") {
+      showToast(`Run #${data.run_id} failed: ${completed.error_message || "review the Query Log"}`, "error");
+    } else {
+      const leadCount = completed.stats?.total_leads || 0;
+      const warning = completed.status === "completed_with_warnings" ? " with connector warnings" : "";
+      showToast(`Run #${data.run_id} complete${warning}: ${leadCount} source-linked results.`, "success");
+    }
+  } else {
+    showToast("Investigation failed. Check backend logs for details.", "error");
+  }
+
   btn.classList.remove("is-running");
   btn.innerHTML = `
     <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z"/></svg>
     Run Investigation`;
-
-  if (data) {
-    showToast(`Investigation complete! Run #${data.run_id} — ${data.connectors?.length || 0} connectors used`, "success");
-    // Reload runs
-    await loadCaseRuns(state.selectedCaseId);
-  } else {
-    showToast("Investigation failed. Check backend logs for details.", "error");
-  }
 }
 
 async function syncCases() {
@@ -1587,6 +1907,11 @@ async function boot() {
     searchTimer = setTimeout(filterCases, 200);
   });
 
+  $("#mobileCasesBtn").addEventListener("click", () => {
+    setMobileCasesOpen(!$("#caseNav").classList.contains("is-open"));
+  });
+  $("#caseNavScrim").addEventListener("click", () => setMobileCasesOpen(false));
+
   // Keyboard shortcut for search
   document.addEventListener("keydown", (e) => {
     if (e.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) {
@@ -1596,6 +1921,7 @@ async function boot() {
     if (e.key === "Escape") {
       $("#globalSearch").blur();
       closeModal();
+      setMobileCasesOpen(false);
     }
   });
 
@@ -1656,8 +1982,8 @@ ${escHtml(JSON.stringify(data, null, 2))}
   });
 
   // Copy brief button
-  $("#copyBriefBtn").addEventListener("click", () => {
-    const text = $("#briefOutput").textContent;
+  $("#copyBriefBtn")?.addEventListener("click", () => {
+    const text = $("#briefOutput")?.textContent;
     if (!text) return;
     navigator.clipboard.writeText(text).then(() => {
       showToast("Authority brief copied to clipboard", "success");

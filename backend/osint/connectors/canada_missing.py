@@ -144,7 +144,7 @@ class CanadaMissingConnector:
                             summary=f"Cross-reference from {source_label}",
                             content_excerpt=title,
                             published_at=published_at,
-                            location_text=context.city or context.province,
+                            location_text=None,
                             source_trust=trust,
                             rationale=[
                                 f"Found through cross-referencing {source_label}.",
@@ -199,7 +199,7 @@ class CanadaMissingConnector:
                     summary=f"Direct link to the authority's public case posting ({context.authority_name}).",
                     content_excerpt=context.authority_case_url,
                     published_at=context.missing_since,
-                    location_text=context.city or context.province,
+                    location_text=None,
                     source_trust=1.0,
                     rationale=["Direct authority-managed case URL from MCSC data."],
                 )

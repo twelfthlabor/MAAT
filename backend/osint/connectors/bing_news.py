@@ -148,6 +148,10 @@ class BingNewsConnector:
 
                     import re
                     clean_desc = re.sub(r"<[^>]+>", "", description)[:500]
+                    text_blob = f"{title} {clean_desc}".lower()
+                    name_parts = [part.lower() for part in (context.name or "").split() if len(part) >= 3]
+                    if name_parts and sum(part in text_blob for part in name_parts) < min(2, len(name_parts)):
+                        continue
 
                     leads.append(
                         NormalizedLead(
@@ -163,7 +167,7 @@ class BingNewsConnector:
                             summary=f"{source_name} | {published_at.date().isoformat() if published_at else 'Unknown date'}",
                             content_excerpt=clean_desc or title,
                             published_at=published_at,
-                            location_text=context.city or context.province,
+                            location_text=None,
                             source_trust=0.55,
                             rationale=[
                                 "Matched through Bing News RSS feed (free, public).",

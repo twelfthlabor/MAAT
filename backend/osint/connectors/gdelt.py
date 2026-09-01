@@ -162,7 +162,9 @@ class GdeltDocConnector:
                     seen_urls.add(source_url)
                     added += 1
                     published_at = _parse_gdelt_datetime(article.get("seendate") or article.get("date"))
-                    location_text = article.get("sourcecountry") or context.city or context.province
+                    # GDELT's source country is not the subject's location.
+                    # Do not present it (or the case city) as a sighting.
+                    location_text = None
                     source_name = article.get("domain") or article.get("sourcecollection") or "GDELT DOC 2.0"
                     summary_bits = [
                         article.get("domain"),

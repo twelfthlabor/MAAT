@@ -4,7 +4,9 @@ OSINT intelligence platform for Canadian missing children cases. Named after Ma'
 
 **The end goal: find the missing kids and notify authorities so we can actually help.**
 
-**[VIEW LIVE DASHBOARD](https://consistentlearningguy.github.io/MAAT/)**
+The previous GitHub Pages URL is no longer active. This repository now includes
+`vercel.json` for a free Vercel frontend deployment with same-origin proxying to
+the existing Render investigation worker.
 
 ## What MAAT Does
 
@@ -27,7 +29,7 @@ OSINT intelligence platform for Canadian missing children cases. Named after Ma'
 ## Architecture
 
 ```text
-docs/            Static public dashboard (GitHub Pages)
+docs/            Static public dashboard (Vercel or GitHub Pages)
 backend/         FastAPI backend — ingestion, enrichment, OSINT connectors, synthesis
   api/           REST endpoints (cases, exports, investigations, sync)
   core/          Config, database, scheduler
@@ -63,7 +65,24 @@ python -m scripts.export_public_data  # write JSON/CSV exports
 python -m backend.main                # start FastAPI server
 ```
 
-### Deploy to GitHub Pages
+### Deploy the frontend to Vercel (recommended)
+
+The FastAPI service runs scheduled jobs, writes SQLite data, and can execute
+long-running local tools such as Sherlock. Those jobs are not a good fit for an
+ephemeral Vercel Function, so the free deployment is intentionally hybrid:
+
+- **Vercel:** static dashboard, bundled fallback data, and same-origin API proxy
+- **Render:** FastAPI investigation worker and OSINT connectors
+
+Import this repository in Vercel and deploy from the repository root. No build
+command, output directory, or frontend environment variables are required;
+`vercel.json` serves `docs/dashboard.html` at `/` and proxies `/api/*` plus
+`/healthz` to the Render service.
+
+For local development, serve `docs/` on port 8080 and run FastAPI on port 8000.
+The dashboard detects localhost automatically.
+
+### Deploy to GitHub Pages (static fallback)
 
 1. Push the repo to GitHub.
 2. Repository Settings → Pages → Deploy from branch `main`, folder `/docs`.
@@ -92,7 +111,18 @@ All connectors are feature-flagged and disabled by default. Enable them via envi
 | `ENABLE_DARK_WEB_CONNECTORS` | Dark web index search (Ahmia) |
 | `ENABLE_EXPERIMENTAL_CONNECTORS` | Experimental/in-progress connectors |
 
-Active connectors include GDELT DOC 2.0 (news/timeline), SearXNG (multi-engine search), Canadian news media, Bing News, Google News RSS, Reddit, Wayback Machine, Canada Missing registry, and official artifacts. Additional adapters (SpiderFoot, theHarvester, Recon-ng, OnionSearch) exist as scaffolds for future integration.
+Active connectors include GDELT DOC 2.0 (news/timeline), SearXNG (multi-engine search), Canadian news media, Bing News, Google News RSS, Reddit, the Wayback Machine CDX API, Arquivo.pt full-text archive search, Sherlock, bounded live WhatsMyName checks, Canada Missing registry, and official artifacts. Additional adapters (SpiderFoot, theHarvester, Recon-ng, OnionSearch) exist as scaffolds for future integration.
+
+Sherlock uses the upstream `sherlock-project` executable and writes its live
+username sweep to a temporary CSV report that MAAT normalizes into explicitly
+unverified account candidates. It never treats a username match as identity or
+location proof. Set `SHERLOCK_BINARY` when the executable is not on `PATH`.
+
+Investigation requests return a queued run immediately. The dashboard polls the
+run record while the worker gathers source-linked results, so a slow archive or
+profile method no longer turns the browser request into a false failure. Handles
+found in recognized public-profile URLs are passed to later username tools; name
+permutations remain lower-confidence fallback hypotheses.
 
 ## Intelligence Synthesis
 

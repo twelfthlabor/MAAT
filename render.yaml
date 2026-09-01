@@ -27,4 +27,4 @@ services:
       - key: REVERSE_IMAGE_PROVIDER_MODE
         value: "links"
       - key: ENABLE_DARK_WEB_CONNECTORS
-        value: "true"
+        value: "false"

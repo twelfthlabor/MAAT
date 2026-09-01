@@ -198,8 +198,32 @@ def _infer_theme(leads: list[dict], category: str) -> str:
     """Infer the theme of a cluster from its content."""
     text_blob = " ".join(_text_key(l) for l in leads).lower()
 
-    if any(kw in text_blob for kw in ("sighting", "spotted", "seen at", "last seen")):
+    # "Last seen" describes the official baseline, not a new sighting. Only
+    # explicit current-sighting language should create an urgent sighting
+    # cluster; otherwise the report falsely escalates the original case fact.
+    sighting_evidence = any(
+        lead.get("lead_type") == "sighting-trace"
+        or lead.get("analysis", {}).get("evidence_type") == "reported_sighting"
+        or any(
+            marker in " ".join(str(item) for item in lead.get("rationale", [])).lower()
+            for marker in (
+                "machine-extracted sighting location",
+                "sighting location extracted",
+                "title sighting location",
+            )
+        )
+        or any(marker in " ".join(
+            str(lead.get(key, "") or "") for key in ("title", "summary", "content_excerpt")
+        ).lower() for marker in (
+            "reported seeing", "possibly seen", "may have been seen",
+            "believed to be seen", "unconfirmed sighting",
+        ))
+        for lead in leads
+    )
+    if sighting_evidence:
         return "potential-sighting"
+    if category in {"official-last-seen", "official-anchor", "official-cross-check"}:
+        return "official-update"
     if any(kw in text_blob for kw in ("rcmp", "police", "investigation", "bulletin", "amber alert")):
         return "official-update"
     if any(kw in text_blob for kw in ("news", "report", "media", "cbc", "ctv", "global")):
@@ -412,6 +436,23 @@ def _detect_temporal_patterns(leads: list[dict], missing_since: datetime | None)
     patterns: list[dict] = []
     dated = [l for l in leads if l.get("published_at")]
 
+    # Historical name matches are useful in the evidence table, but must not
+    # create a false post-disappearance activity burst or active-trail signal.
+    if missing_since is not None:
+        baseline = missing_since if missing_since.tzinfo else missing_since.replace(tzinfo=timezone.utc)
+        current_dated = []
+        for lead in dated:
+            try:
+                value = lead["published_at"]
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                if parsed >= baseline:
+                    current_dated.append(lead)
+            except (AttributeError, TypeError, ValueError):
+                current_dated.append(lead)
+        dated = current_dated
+
     if not dated:
         return patterns
 
@@ -513,7 +554,10 @@ def _generate_recommendations(
         ))
 
     # Sighting clusters
-    sighting_clusters = [c for c in clusters if c.theme == "potential-sighting"]
+    sighting_clusters = [
+        c for c in clusters
+        if c.theme == "potential-sighting" and c.max_confidence >= 0.6
+    ]
     for cluster in sighting_clusters:
         recs.append(ActionableRecommendation(
             priority=1,
@@ -591,7 +635,10 @@ def _build_situation_summary(
     if high_confidence:
         parts.append(f"{high_confidence} lead{'s' if high_confidence != 1 else ''} scored above 60% confidence.")
 
-    sighting_clusters = [c for c in clusters if c.theme == "potential-sighting"]
+    sighting_clusters = [
+        c for c in clusters
+        if c.theme == "potential-sighting" and c.max_confidence >= 0.6
+    ]
     if sighting_clusters:
         parts.append(f"ALERT: {len(sighting_clusters)} potential sighting cluster{'s' if len(sighting_clusters) != 1 else ''} detected.")
 
@@ -633,7 +680,10 @@ def _build_authority_brief(
     if high_confidence:
         lines.append(f"  {high_confidence} high-confidence leads require review.")
 
-    sighting_clusters = [c for c in clusters if c.theme == "potential-sighting"]
+    sighting_clusters = [
+        c for c in clusters
+        if c.theme == "potential-sighting" and c.max_confidence >= 0.6
+    ]
     if sighting_clusters:
         for sc in sighting_clusters:
             lines.append(f"  Sighting cluster: {sc.label} ({len(sc.lead_ids)} reports)")

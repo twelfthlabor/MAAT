@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 
 from backend.models.case import Case
 from backend.osint.normalization.models import NormalizedLead
@@ -49,6 +50,8 @@ _MISSING_KEYWORDS = {
     "missing", "disappeared", "last seen", "police", "rcmp", "amber alert",
     "vulnerable", "appeal", "search", "located", "found safe", "sighting",
     "tips", "reward", "abducted", "runaway", "endangered",
+    "disparition", "disparu", "disparue", "fugue", "derniere fois vue",
+    "appel a temoins", "portee disparue", "porte disparu", "recherchee", "recherche",
 }
 
 _IRRELEVANT_KEYWORDS = {
@@ -59,10 +62,64 @@ _IRRELEVANT_KEYWORDS = {
     "nylon-queens", "foxy reviews",
 }
 
+_ACTIONABLE_LOCATION_TERMS = {
+    "last seen", "seen near", "seen in", "seen at", "in the area", "near the",
+    "intersection", "boulevard", "avenue", "street", "highway", "station",
+    "terminal", "park", "mall", "hospital", "school", "sector", "quartier",
+    "derniere fois vue", "vue pres", "vue dans", "secteur", "rue", "autoroute",
+}
+
+_ACTIONABLE_DESCRIPTION_TERMS = {
+    "wearing", "clothing", "hoodie", "jacket", "pants", "shoes", "bag",
+    "backpack", "coat", "sweater", "hair", "eyes", "portait", "vetue",
+    "cheveux", "yeux", "sac",
+}
+
+_ACTIONABLE_VEHICLE_TERMS = {
+    "vehicle", "driving", "plate", "licence plate", "license plate", "car", "truck",
+    "suv", "van", "toyota", "honda", "ford",
+}
+
+_ACTIONABLE_MOVEMENT_TERMS = {
+    "heading", "toward", "towards", "traveling", "travelling", "direction",
+    "left home", "ran away", "went missing from", "may be in", "en direction",
+    "vers", "quitte", "en fugue de", "pourrait se trouver",
+}
+
+_AMPLIFICATION_TERMS = {
+    "please share", "please rt", "share this", "retweet", "read & rt", "how to help",
+    "join the conversation", "support us", "subscribe to our newsletter",
+}
+
 
 def _name_in_text(name: str, text: str) -> bool:
     """Check if the full name appears in the text (case-insensitive)."""
     return name.lower() in text.lower()
+
+
+def _has_expanded_single_name(case_name: str, text: str) -> bool:
+    """Detect a likely namesake when the case only has a given name."""
+    parts = [part for part in case_name.split() if len(part) >= 3]
+    if len(parts) != 1:
+        return False
+    escaped = re.escape(parts[0])
+    return bool(re.search(rf"\b{escaped}\s+[a-z][a-z'-]{{2,}}\b", text, flags=re.IGNORECASE))
+
+
+def _case_specific_anchor_hits(case: Case, text: str) -> list[str]:
+    """Return distinctive facts from the official summary found in a result."""
+    summary = re.sub(r"<[^>]+>", " ", case.official_summary_html or "").lower()
+    anchors: set[str] = set()
+
+    for pattern in (
+        r"\b(?:blue|black|white|red|grey|gray)\s+(?:honda|toyota|ford|chevrolet|chevy|dodge|nissan|mazda|volkswagen)\b",
+        r"\b[a-z0-9][a-z0-9'-]*\s+(?:road|street|avenue|boulevard|drive|lane|highway)\b",
+        r"\b\d{1,2}['’]\d{1,2}(?:\"|″)?\b",
+        r"\b(?:reference|file)(?:\s+case)?\s*(?:#|number)?\s*[a-z0-9-]{4,}\b",
+    ):
+        anchors.update(match.group(0).strip() for match in re.finditer(pattern, summary))
+
+    return sorted(anchor for anchor in anchors if anchor in text)
 
 
 def _relevance_score(case: Case, lead: NormalizedLead) -> tuple[float, list[str]]:
@@ -74,6 +131,11 @@ def _relevance_score(case: Case, lead: NormalizedLead) -> tuple[float, list[str]
     score = 0.0
 
     name_present = bool(case.name and _name_in_text(case.name, text_blob))
+    name_parts = [part.lower() for part in (case.name or "").split() if len(part) >= 3]
+    anchor_hits = _case_specific_anchor_hits(case, text_blob)
+    expanded_single_name = bool(
+        case.name and _has_expanded_single_name(case.name, text_blob)
+    )
 
     matched_keywords = [kw for kw in _MISSING_KEYWORDS if kw in text_blob]
     if matched_keywords:
@@ -126,11 +188,37 @@ def _relevance_score(case: Case, lead: NormalizedLead) -> tuple[float, list[str]
         score -= 0.2
         reasons.append("No missing-person keywords and name not found - likely irrelevant.")
 
+    # Given names such as Joshua, Michael, or David produce many unrelated
+    # search results. Require a case-specific anchor or the case geography /
+    # authority before allowing those results to rank as strong evidence.
+    if len(name_parts) == 1 and lead.source_kind != "official":
+        has_case_geography = bool(
+            (case.authority_name and case.authority_name.lower() in text_blob)
+            or (
+                case.city and case.city.lower() in text_blob
+                and case.province and case.province.lower() in text_blob
+            )
+        )
+        if not has_case_geography and len(anchor_hits) < 2:
+            score -= 0.5
+            reasons.append(
+                "Ambiguous single-name result lacks case geography, authority, or two distinctive official anchors."
+            )
+        elif anchor_hits:
+            reasons.append(f"Case-specific official anchor(s) matched: {', '.join(anchor_hits[:3])}.")
+        if not name_present:
+            score -= 0.35
+            reasons.append("Single-name result does not contain the subject name in its returned text; retain as context only until identity is confirmed.")
+        elif expanded_single_name:
+            score -= 0.25
+            reasons.append(
+                "Result pairs the given name with another surname; treat as a possible namesake until identity is confirmed."
+            )
+
     # Penalize leads where no part of the person's name appears at all.
     # This filters cross-case contamination (e.g., different missing persons
     # returned by broad keyword searches).
     if case.name and lead.source_kind != "official":
-        name_parts = [p.lower() for p in case.name.split() if len(p) >= 3]
         parts_found = sum(1 for p in name_parts if p in text_blob)
         if parts_found == 0 and name_parts:
             score -= 0.30
@@ -141,6 +229,44 @@ def _relevance_score(case: Case, lead: NormalizedLead) -> tuple[float, list[str]
         reasons.append("Official source gets a relevance boost.")
 
     return max(0.0, min(1.0, score)), reasons
+
+
+def _actionability_delta(lead: NormalizedLead) -> tuple[float, list[str]]:
+    """Estimate whether a lead adds locating detail vs only amplifying an alert."""
+
+    text_blob = " ".join(
+        filter(None, [lead.title or "", lead.summary or "", lead.content_excerpt or "", lead.location_text or ""])
+    ).lower()
+
+    delta = 0.0
+    reasons: list[str] = []
+
+    has_location_detail = any(term in text_blob for term in _ACTIONABLE_LOCATION_TERMS)
+    has_description_detail = any(term in text_blob for term in _ACTIONABLE_DESCRIPTION_TERMS)
+    has_vehicle_detail = any(term in text_blob for term in _ACTIONABLE_VEHICLE_TERMS)
+    has_movement_detail = any(term in text_blob for term in _ACTIONABLE_MOVEMENT_TERMS)
+
+    if lead.lead_type in {"official-last-seen", "sighting-trace"}:
+        delta += 0.08
+        reasons.append("Lead is typed as last-seen or sighting intelligence.")
+    if has_location_detail:
+        delta += 0.12
+        reasons.append("Lead contains last-seen or location-specific detail.")
+    if has_description_detail:
+        delta += 0.08
+        reasons.append("Lead contains physical or clothing detail.")
+    if has_vehicle_detail:
+        delta += 0.08
+        reasons.append("Lead contains vehicle or plate detail.")
+    if has_movement_detail:
+        delta += 0.06
+        reasons.append("Lead contains movement or travel-direction detail.")
+
+    if any(term in text_blob for term in _AMPLIFICATION_TERMS) and delta < 0.08 and lead.source_kind != "official":
+        delta -= 0.05
+        reasons.append("Amplification/share language without new locating detail lowers utility.")
+
+    return delta, reasons
 
 
 def score_lead(case: Case, lead: NormalizedLead) -> ScoredLead:
@@ -193,11 +319,55 @@ def score_lead(case: Case, lead: NormalizedLead) -> ScoredLead:
     corroboration_component = min(1.0, lead.corroboration_count / 3)
     total += corroboration_component * 0.10
     if lead.corroboration_count > 1:
-        rationale.append("Cross-source corroboration increased the score.")
+        rationale.append("Repeated across public query variants or source adapters; independent corroboration still requires review.")
+
+    actionability_delta, actionability_reasons = _actionability_delta(lead)
+    total += actionability_delta
+    rationale.extend(actionability_reasons)
 
     if lead.source_kind == "dark-web-capable":
         total -= 0.05
         rationale.append("Dark-web-capable indexing results are down-weighted until manually reviewed.")
+
+    # ── Lead-type utility boosts ────────────────────────────────────
+    # Certain lead types are inherently more actionable regardless of
+    # keyword presence in the text.
+    if lead.lead_type == "tip-line":
+        total += 0.06
+        rationale.append("Tip-line leads are inherently high-value reporting channels.")
+    elif lead.lead_type == "analyst-action":
+        # Analyst action links are tools — their value depends on category
+        action_boost = {
+            "people-search": 0.05,
+            "username-enumeration": 0.03,
+            "geolocation": 0.04,
+            "reporting-channel": 0.06,
+            "email-enumeration": 0.02,
+            "reverse-image": 0.04,
+        }.get(lead.category, 0.02)
+        total += action_boost
+
+    # ── Sighting-report boost ───────────────────────────────────────
+    sighting_signals = ["spotted", "sighted", "possibly spotted", "may have been seen",
+                        "reported seeing", "believed to be seen", "unconfirmed sighting"]
+    text_check = " ".join(filter(None, [lead.title or "", lead.summary or "", lead.content_excerpt or ""])).lower()
+    if any(sig in text_check for sig in sighting_signals):
+        total += 0.10
+        rationale.append("Potential sighting language detected; manual verification required.")
+
+    # ── Content-enrichment boost ────────────────────────────────────
+    # Leads that have been enriched with extracted sighting details
+    # are more valuable than raw headlines.
+    enrichment_signals = [
+        "Machine-extracted sighting location (unverified):",
+        "Sighting location extracted:",
+        "Physical description:",
+        "Locations mentioned:",
+    ]
+    lead_rationale_text = " ".join(lead.rationale)
+    if any(sig in lead_rationale_text for sig in enrichment_signals):
+        total += 0.08
+        rationale.append("Article content was machine-extracted; details remain unverified.")
 
     for existing_reason in lead.rationale:
         rationale.append(existing_reason)

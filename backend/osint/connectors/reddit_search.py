@@ -196,7 +196,7 @@ class RedditSearchConnector:
                             title=title,
                             summary=summary_text,
                             content_excerpt=clean_content,
-                            location_text=context.city or context.province,
+                            location_text=None,
                             source_trust=trust,
                             rationale=rationale_notes,
                         )

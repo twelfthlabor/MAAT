@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.core.config import settings
-from backend.core.database import get_db
+from backend.core.database import SessionLocal, get_db
 from backend.models.case import Case
 from backend.models.investigation import InvestigationRun, Lead, SearchQueryLog
+from backend.osint.lead_analysis import assess_lead
 from backend.osint.resource_pack import build_case_resource_pack
 from backend.osint.synthesis import synthesize_investigation
 from backend.services.investigation_service import InvestigationService
 from backend.services.review_service import ReviewService
 
 router = APIRouter(prefix="/api/investigations", tags=["investigations"])
+logger = logging.getLogger(__name__)
 
 
 class ReviewPayload(BaseModel):
@@ -44,14 +47,35 @@ def _get_case_or_404(db: Session, case_id: int) -> Case:
     return case
 
 
-@router.post("/{case_id}")
-async def run_investigation(case_id: int, db: Session = Depends(get_db)) -> dict:
+async def _execute_queued_investigation(case_id: int, run_id: int) -> None:
+    """Execute a queued run after the HTTP response has been returned."""
+
+    with SessionLocal() as session:
+        try:
+            await InvestigationService(session).run_for_case(case_id, run_id=run_id)
+        except Exception:
+            logger.exception("Queued investigation %s failed", run_id)
+
+
+@router.post("/{case_id}", status_code=202)
+async def run_investigation(
+    case_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> dict:
     _ensure_enabled()
     try:
-        run = await InvestigationService(db).run_for_case(case_id)
+        run, created = InvestigationService(db).queue_for_case(case_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"run_id": run.id, "status": run.status, "connectors": run.connector_names}
+    if created:
+        background_tasks.add_task(_execute_queued_investigation, case_id, run.id)
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "connectors": run.connector_names,
+        "reused_active_run": not created,
+    }
 
 
 @router.get("/cases/{case_id}/runs")
@@ -148,6 +172,7 @@ def get_run_leads(
         "leads": [
             {
                 "id": lead.id,
+                "lead_type": lead.lead_type,
                 "title": lead.title,
                 "summary": lead.summary,
                 "content_excerpt": lead.content_excerpt,
@@ -168,6 +193,7 @@ def get_run_leads(
                 "published_at": lead.published_at.isoformat() if lead.published_at else None,
                 "latitude": lead.latitude,
                 "longitude": lead.longitude,
+                "analysis": assess_lead(lead),
             }
             for lead in leads
         ]
@@ -230,6 +256,7 @@ def get_run_synthesis(run_id: int, db: Session = Depends(get_db)) -> dict:
     lead_dicts = [
         {
             "id": lead.id,
+            "lead_type": lead.lead_type,
             "title": lead.title,
             "summary": lead.summary,
             "content_excerpt": lead.content_excerpt,
@@ -249,6 +276,7 @@ def get_run_synthesis(run_id: int, db: Session = Depends(get_db)) -> dict:
             "published_at": lead.published_at.isoformat() if lead.published_at else None,
             "latitude": lead.latitude,
             "longitude": lead.longitude,
+            "analysis": assess_lead(lead),
         }
         for lead in leads
     ]

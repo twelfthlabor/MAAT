@@ -246,7 +246,7 @@ class SocialProfilerConnector:
                             title=title or "Social media result",
                             summary=f"{q['platform']} profile/mention — {q['category']}",
                             content_excerpt=body[:500] if body else "",
-                            location_text=context.city or context.province,
+                            location_text=None,
                             source_trust=0.40,
                             rationale=rationale,
                         )
@@ -309,7 +309,7 @@ class SocialProfilerConnector:
                                     title=title or "Cross-platform handle match",
                                     summary=f"Handle @{handle} found on {plat['label']}",
                                     content_excerpt=body[:500] if body else "",
-                                    location_text=context.city or context.province,
+                                    location_text=None,
                                     source_trust=0.35,
                                     rationale=[
                                         f"Cross-platform pivot: handle @{handle} discovered on {plat['label']}.",

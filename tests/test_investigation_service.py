@@ -98,3 +98,35 @@ def test_investigation_service_passes_case_photo_urls(monkeypatch):
         assert len(run.leads) == 1
         assert run.leads[0].query_used == "https://example.org/case-photo.jpg"
         assert "deduplicated lead" in (run.inference_summary or "")
+
+
+def test_investigation_service_reuses_active_queued_run(monkeypatch):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, future=True)
+    Session = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
+    Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr("backend.services.investigation_service.enabled_connectors", lambda: [PhotoEchoConnector()])
+
+    with Session() as session:
+        case = Case(
+            id=2,
+            slug="queued-case",
+            name="Queued Example",
+            aliases=[],
+            city="Toronto",
+            province="Ontario",
+            age=15,
+            status="missing",
+            case_status="open",
+            source_feed="MCSC",
+            is_active=True,
+        )
+        session.add(case)
+        session.commit()
+
+        first, created = InvestigationService(session).queue_for_case(case.id)
+        second, second_created = InvestigationService(session).queue_for_case(case.id)
+
+        assert created is True
+        assert second_created is False
+        assert second.id == first.id
+        assert first.status == "queued"

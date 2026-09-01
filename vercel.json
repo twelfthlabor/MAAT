@@ -1,0 +1,45 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "cleanUrls": true,
+  "rewrites": [
+    {
+      "source": "/healthz",
+      "destination": "https://maat-backend-yzu6.onrender.com/healthz"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "https://maat-backend-yzu6.onrender.com/api/:path*"
+    },
+    {
+      "source": "/assets/:path*",
+      "destination": "/docs/assets/:path*"
+    },
+    {
+      "source": "/data/:path*",
+      "destination": "/docs/data/:path*"
+    },
+    {
+      "source": "/dashboard",
+      "destination": "/docs/dashboard"
+    },
+    {
+      "source": "/dashboard.html",
+      "destination": "/docs/dashboard"
+    },
+    {
+      "source": "/",
+      "destination": "/docs/dashboard"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
+      ]
+    }
+  ]
+}

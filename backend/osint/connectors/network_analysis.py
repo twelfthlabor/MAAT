@@ -221,6 +221,15 @@ class NetworkAnalysisConnector:
                     title = result.get("title", "")
                     body = result.get("body", "")
 
+                    if q["category"] == "sighting-trace":
+                        sighting_blob = f"{title} {body}".lower()
+                        explicit_sighting_terms = (
+                            "reported seeing", "possibly spotted", "spotted", "sighted",
+                            "may have been seen", "believed to be seen", "unconfirmed sighting",
+                        )
+                        if not any(term in sighting_blob for term in explicit_sighting_terms):
+                            continue
+
                     if not _name_relevant(context.name or "", title, body):
                         continue
                     if _is_adult_content(title, body):
@@ -242,7 +251,7 @@ class NetworkAnalysisConnector:
                             title=title or "Network analysis result",
                             summary=q["rationale"],
                             content_excerpt=body[:500] if body else "",
-                            location_text=context.city or context.province,
+                            location_text=None,
                             source_trust=0.40,
                             rationale=[
                                 f"Trace Labs technique: {q['category'].replace('-', ' ')}.",

@@ -196,7 +196,7 @@ class CanadianNewsMediaConnector:
                                 summary=f"{source['name']} | {published_at.date().isoformat() if published_at else 'Unknown date'}",
                                 content_excerpt=description or title,
                                 published_at=published_at,
-                                location_text=context.city or context.province,
+                                location_text=None,
                                 source_trust=trust,
                                 rationale=[
                                     f"Matched through {source['name']} RSS feed (Canadian national broadcaster).",

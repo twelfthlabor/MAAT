@@ -114,7 +114,7 @@ class DuckDuckGoHtmlConnector:
                             title=title,
                             summary=body or "Public web search result",
                             content_excerpt=body[:500],
-                            location_text=context.city or context.province,
+                            location_text=None,
                             source_trust=0.45,
                             rationale=[
                                 "Matched through DuckDuckGo web search (free, public).",
@@ -187,7 +187,7 @@ class DuckDuckGoHtmlConnector:
                             title=title,
                             summary=body or "News article from DuckDuckGo",
                             content_excerpt=body[:500],
-                            location_text=context.city or context.province,
+                            location_text=None,
                             source_trust=0.50,
                             rationale=[
                                 "Matched through DuckDuckGo news search (free, public).",

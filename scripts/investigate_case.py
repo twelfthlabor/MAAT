@@ -20,8 +20,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Suppress noisy third-party logging BEFORE importing backend modules
+import logging
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.engine.Engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 from backend.core.config import settings
-from backend.core.database import SessionLocal, init_db
+from backend.core.database import SessionLocal, init_db, engine
+# Disable engine echo to suppress SQL logging in investigation scripts
+engine.echo = False
 from backend.enrichment.official_context import extract_official_context
 from backend.ingestion.mcsc import MCSCArcGISClient, normalize_case_feature
 from backend.models.case import Case, CasePhoto, ResourceLink, SourceRecord
@@ -199,7 +208,7 @@ async def investigate_case(session, case: Case) -> InvestigationRun:
         name = connector.metadata.name
         print(f"\n  >> {name}...", end=" ", flush=True)
         try:
-            result = await connector.run(query_context)
+            result = await asyncio.wait_for(connector.run(query_context), timeout=60.0)
             if result.warning:
                 print(f"⚠ {result.warning[:80]}")
                 run.query_logs.append(SearchQueryLog(
@@ -227,6 +236,17 @@ async def investigate_case(session, case: Case) -> InvestigationRun:
 
             collected_leads.extend(result.leads)
 
+        except asyncio.TimeoutError:
+            print(f"TIMEOUT (>60s)")
+            connector_failures.append(f"{name}: timeout after 60s")
+            run.query_logs.append(SearchQueryLog(
+                connector_name=name,
+                source_kind=connector.metadata.source_kind,
+                query_used="[connector invocation]",
+                status="timeout",
+                notes="Connector exceeded 60s timeout",
+                completed_at=datetime.now(timezone.utc),
+            ))
         except Exception as exc:
             print(f"FAILED: {exc}")
             connector_failures.append(f"{name}: {exc}")
@@ -241,6 +261,166 @@ async def investigate_case(session, case: Case) -> InvestigationRun:
 
     # Deduplicate and score leads
     normalized_leads = merge_normalized_leads(collected_leads)
+
+    # ── Content Extraction Enrichment Pass ──────────────────────────
+    # Fetch the top news article URLs and extract sighting intelligence
+    from backend.enrichment.content_extraction import fetch_and_extract, summarize_sighting, resolve_google_news_url
+
+    # Phase 1: Resolve Google News redirect URLs to actual article URLs
+    google_news_leads = [
+        lead for lead in normalized_leads
+        if lead.source_url and lead.source_url.startswith("https://news.google.com/rss/")
+        and lead.title
+    ]
+    if google_news_leads:
+        _print_section(f"Resolving {len(google_news_leads)} Google News URLs", "-")
+        resolved_count = 0
+        for lead in google_news_leads[:15]:  # Cap to avoid rate-limiting
+            print(f"  >> Resolving: {lead.title[:70]}...", end=" ", flush=True)
+            try:
+                real_url = await resolve_google_news_url(lead.title, subject_name=case.name or "")
+                if real_url:
+                    lead.source_url = real_url
+                    resolved_count += 1
+                    print(f"OK → {real_url[:60]}")
+                else:
+                    print("not found")
+            except Exception as exc:
+                print(f"error: {exc}")
+        print(f"\n  Resolved: {resolved_count}/{len(google_news_leads[:15])} Google News URLs")
+
+    # Phase 2: Fetch articles and extract sighting intelligence
+    # Domains that are never relevant to a missing-person case
+    _IRRELEVANT_DOMAINS = {
+        "pinterest", "scispace.com", "loop.frontiersin.org", "baidu.com",
+        "marketscreener.com", "enidbuzz.com", "linkedin.com", "imdb.com",
+        "amazon.com", "ebay.com", "etsy.com", "goodreads.com", "academia.edu",
+        "researchgate.net", "scholar.google", "zhidao.baidu", "zhihu.com",
+        "grokipedia.com", "fandom.com", "crunchbase.com", "facebook.com/public",
+        "shreveportbossierjournal.com", "europesays.com", "wikipedia.org",
+        "pdfcoffee.com", "scribd.com", "archive.org/details", "issuu.com",
+        "slideshare.net", "docplayer.net", "kupdf.net", "pdfslide.net",
+    }
+    # Title patterns that indicate a wrong-person result
+    _IRRELEVANT_TITLE_WORDS = {
+        "university", "publications", "textile", "pinterest", "obituary",
+        "remembering", "in memoriam", "positions, relations", "marketscreener",
+        "loop |", "linkedin", "imdb", "amazon", "etsy", "goodreads",
+        "academia", "researchgate", "fandom", "crunchbase", "grokipedia",
+        "number_sign", "wikipedia", "twin peaks", "pdf free", "pdfcoffee",
+        "timeline pdf", "script pdf", "novel", "movie", "tv show",
+    }
+
+    def _is_relevant_lead(lead) -> bool:
+        """Check if a lead is plausibly about the missing person, not a namesake."""
+        url = (lead.source_url or "").lower()
+        title = (lead.title or "").lower()
+        # Skip known-irrelevant domains
+        if any(d in url for d in _IRRELEVANT_DOMAINS):
+            return False
+        # Skip titles that indicate a different person
+        if any(w in title for w in _IRRELEVANT_TITLE_WORDS):
+            return False
+        return True
+
+    enrichment_candidates = [
+        lead for lead in normalized_leads
+        if lead.lead_type in ("news-article", "web-mention", "archived-page",
+                              "sighting-trace", "community-discussion")
+        and lead.source_url
+        and not lead.source_url.startswith("https://news.google.com/rss/")  # Skip unresolved
+        and _is_relevant_lead(lead)
+    ]
+    # Process top 25 most promising articles
+    enrichment_candidates = enrichment_candidates[:25]
+
+    if enrichment_candidates:
+        _print_section(f"Enriching {len(enrichment_candidates)} articles with content extraction", "-")
+        enriched_count = 0
+        for lead in enrichment_candidates:
+            print(f"  >> Fetching: {lead.source_url[:80]}...", end=" ", flush=True)
+            try:
+                detail = await fetch_and_extract(lead.source_url, subject_name=case.name or "")
+                if detail:
+                    # Post-enrichment relevance check: verify the article is about the subject
+                    raw_lower = detail.raw_text.lower()
+                    name_parts = (case.name or "").lower().split()
+                    last_name = name_parts[-1] if name_parts else ""
+                    article_mentions_subject = (
+                        last_name and last_name in raw_lower
+                        and any(kw in raw_lower for kw in ["missing", "last seen", "disappeared", "search for", "help find"])
+                    )
+                    if not article_mentions_subject:
+                        print("SKIPPED (article not about subject)")
+                        continue
+
+                    summary = summarize_sighting(detail)
+                    if summary:
+                        enriched_count += 1
+                        # Enhance the lead with extracted intelligence
+                        if detail.sighting_location and not lead.location_text:
+                            lead.location_text = detail.sighting_location
+                        if detail.key_facts:
+                            lead.content_excerpt = detail.key_facts[0][:500]
+                        if detail.reward_amount:
+                            lead.rationale.append(f"Reward: {detail.reward_amount}")
+                        if detail.contact_info:
+                            lead.rationale.append(f"Contact: {', '.join(detail.contact_info[:2])}")
+                        if detail.sighting_location:
+                            lead.rationale.append(f"Machine-extracted sighting location (unverified): {detail.sighting_location}")
+                        if detail.physical_description:
+                            lead.rationale.append(f"Physical description: {'; '.join(detail.physical_description[:3])}")
+                        if detail.mentioned_locations:
+                            lead.rationale.append(f"Locations mentioned: {', '.join(detail.mentioned_locations[:5])}")
+                        if detail.clothing_description:
+                            lead.rationale.append(f"Clothing: {detail.clothing_description[0][:100]}")
+                        if detail.witness_quotes:
+                            lead.rationale.append(f"Quote: \"{detail.witness_quotes[0][:150]}\"")
+                        if detail.direction_of_travel:
+                            lead.rationale.append(f"Direction: {detail.direction_of_travel[:100]}")
+                        if detail.vehicle_description:
+                            lead.rationale.append(f"Vehicle: {detail.vehicle_description}")
+                        if detail.licence_plate:
+                            lead.rationale.append(f"Licence plate: {detail.licence_plate}")
+                        # Tag the lead for scoring boost
+                        lead.rationale.append("Article content was machine-extracted; details remain unverified.")
+                        print(f"ENRICHED ({summary[:60]})")
+                    else:
+                        print("no sighting details found")
+                else:
+                    print("could not fetch")
+            except Exception as exc:
+                print(f"error: {exc}")
+        print(f"\n  Enrichment complete: {enriched_count}/{len(enrichment_candidates)} articles extracted")
+
+    # Phase 3: Extract sighting locations from lead titles (no fetch needed)
+    from backend.enrichment.content_extraction import _CANADIAN_CITIES, _SIGHTING_PHRASES
+    title_sighting_count = 0
+    # Don't count the case's own city as a "sighting" — it's the origin
+    home_city = (case.city or "").lower().strip()
+    for lead in normalized_leads:
+        title_lower = (lead.title or "").lower()
+        # Check if the title contains a sighting phrase AND a known location
+        if _SIGHTING_PHRASES.search(title_lower):
+            for city in _CANADIAN_CITIES:
+                if city in title_lower and city != home_city:
+                    # Skip if the city appears as "missing [city]" — that's the origin, not a sighting
+                    origin_patterns = [
+                        f"missing {city}", f"from {city}", f"{city} senior",
+                        f"{city} woman", f"{city} man", f"{city} teen",
+                        f"{city} girl", f"{city} boy", f"{city} resident",
+                        f"({city})", f"({city},",
+                    ]
+                    if any(p in title_lower for p in origin_patterns):
+                        continue
+                    if not lead.location_text or lead.location_text.lower() != city:
+                        lead.rationale.append(f"Title sighting location (unverified): {city.title()}")
+                    if not any("Sighting location" in str(r) for r in lead.rationale):
+                        lead.rationale.append(f"Machine-extracted sighting location (unverified): {city.title()}")
+                    title_sighting_count += 1
+                    break
+    if title_sighting_count:
+        print(f"  Extracted {title_sighting_count} sighting locations from lead titles")
 
     _print_section(f"Scoring {len(normalized_leads)} deduplicated leads", "-")
 
@@ -579,6 +759,11 @@ async def investigate_case(session, case: Case) -> InvestigationRun:
     with open(export_file, "w", encoding="utf-8") as f:
         json.dump(export_data, f, indent=2, default=str)
     print(f"\n  Leads exported to: {export_file}")
+
+    # Generate intel report
+    from backend.enrichment.intel_report import generate_intel_report
+    report_path = generate_intel_report(export_file)
+    print(f"  Intel report: {report_path}")
 
     return run
 

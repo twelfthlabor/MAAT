@@ -48,6 +48,26 @@ _LINK_PROVIDERS: list[dict[str, str]] = [
         "url_template": "https://www.bing.com/images/search?q=imgurl:{encoded_url}&view=detailv2&iss=sbi",
         "rationale": "Bing Visual Search — surfaces matching images and pages across the public web.",
     },
+    {
+        "name": "PimEyes OSINT",
+        "url_template": "https://pimeyes.com/en",
+        "rationale": "PimEyes facial recognition search engine — strong for finding faces across the open web. Upload case photo manually.",
+    },
+    {
+        "name": "FaceCheck.ID",
+        "url_template": "https://facecheck.id/",
+        "rationale": "FaceCheck.ID — facial recognition search across social media, news, mugshots. Upload case photo manually.",
+    },
+    {
+        "name": "Lenso.ai",
+        "url_template": "https://lenso.ai/en",
+        "rationale": "Lenso.ai — AI-powered reverse image search that finds people, places, and duplicates. Upload case photo manually.",
+    },
+    {
+        "name": "Search4faces",
+        "url_template": "https://search4faces.com/",
+        "rationale": "Search4faces — searches VK and OK social network photos by face. Upload case photo manually.",
+    },
 ]
 
 
@@ -99,7 +119,19 @@ class ReverseImageConnector:
         encoded = quote(image_url, safe="")
         leads = []
         for provider in _LINK_PROVIDERS:
-            search_url = provider["url_template"].format(encoded_url=encoded)
+            template = provider["url_template"]
+            if "{encoded_url}" in template:
+                search_url = template.format(encoded_url=encoded)
+                summary = (
+                    f"Pre-built {provider['name']} reverse image search for this case photo. "
+                    "Click the link to view matching pages and re-uses of the photo."
+                )
+            else:
+                search_url = template
+                summary = (
+                    f"{provider['name']} — facial recognition / reverse image tool. "
+                    f"Open the link and manually upload the case photo to search. Photo URL: {image_url}"
+                )
             leads.append(
                 NormalizedLead(
                     connector_name=self.metadata.name,
@@ -111,10 +143,7 @@ class ReverseImageConnector:
                     query_used=image_url,
                     found_at=found_at,
                     title=f"Reverse image search — {provider['name']} ({case_name})",
-                    summary=(
-                        f"Pre-built {provider['name']} reverse image search for this case photo. "
-                        "Click the link to view matching pages and re-uses of the photo."
-                    ),
+                    summary=summary,
                     content_excerpt=f"Photo: {image_url}",
                     source_trust=0.35,
                     rationale=[

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -22,6 +23,21 @@ def _parse_wayback_timestamp(ts: str) -> datetime | None:
         return datetime.strptime(ts, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
+
+
+def _is_archivable_page(url: str | None) -> bool:
+    """Accept public page URLs while excluding feeds and API endpoints."""
+
+    if not url:
+        return False
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    lowered = url.lower()
+    return not any(
+        marker in lowered
+        for marker in ("arcgis.com", "featureserver", "/rest/services/", "/api/")
+    )
 
 
 class WaybackMachineConnector:
@@ -61,12 +77,14 @@ class WaybackMachineConnector:
                 (f"missingkids.ca/*{name_hyphen}*", "cccp-missing-db")
             )
 
-        # Check specific official URLs if they are simple enough for CDX
-        if context.authority_case_url:
-            url = context.authority_case_url
-            # Only check URLs that are actual web pages, not API endpoints
-            if not any(skip in url for skip in ["arcgis.com", "FeatureServer", "/rest/services/"]):
-                urls_to_check.append((url, "official-case-page"))
+        # Check every source-backed case page, not only the authority URL. This
+        # lets the archive sweep recover deleted public appeals and news pages.
+        for url in [context.authority_case_url, *context.source_urls]:
+            if _is_archivable_page(url):
+                urls_to_check.append((url, "case-source-page"))
+
+        # Preserve order while avoiding repeated CDX calls for the same source.
+        urls_to_check = list(dict.fromkeys(urls_to_check))
 
         if not urls_to_check:
             return ConnectorRunResult(warning="No URLs to check against the Wayback Machine.")
@@ -77,7 +95,7 @@ class WaybackMachineConnector:
         factory = self.client_factory or (lambda timeout: httpx.AsyncClient(timeout=timeout, follow_redirects=True))
 
         async with factory(settings.connector_timeout_seconds) as client:
-            for check_url, url_type in urls_to_check[:6]:
+            for check_url, url_type in urls_to_check[:8]:
                 try:
                     params: dict[str, str] = {
                         "url": check_url,
@@ -86,6 +104,7 @@ class WaybackMachineConnector:
                         "filter": "statuscode:200",
                         "fl": "timestamp,original,mimetype,statuscode",
                         "sort": "reverse",
+                        "collapse": "digest",
                     }
                     response = await client.get(
                         "https://web.archive.org/cdx/search/cdx",
@@ -129,7 +148,7 @@ class WaybackMachineConnector:
 
                     # Determine trust based on URL type
                     trust = 0.50
-                    if url_type == "official-case-page":
+                    if url_type in {"official-case-page", "case-source-page"}:
                         trust = 0.70
                     elif url_type in ("rcmp-missing-db", "cccp-missing-db"):
                         trust = 0.65
@@ -151,7 +170,7 @@ class WaybackMachineConnector:
                             summary=f"Wayback Machine snapshot from {timestamp[:8]} of {original_url}",
                             content_excerpt=f"Archived {mimetype} page captured on {timestamp[:8]}. "
                                           f"Original URL: {original_url}",
-                            location_text=context.city or context.province,
+                            location_text=None,
                             source_trust=trust,
                             rationale=[
                                 f"Archived evidence from Internet Archive ({url_type}).",

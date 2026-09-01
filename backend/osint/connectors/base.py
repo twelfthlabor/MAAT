@@ -19,6 +19,7 @@ class ConnectorMetadata:
     disabled_by_default: bool
     unstable: bool = False
     description: str = ""
+    timeout_seconds: float | None = None
 
 
 class Connector(Protocol):

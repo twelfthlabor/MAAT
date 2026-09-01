@@ -5,6 +5,21 @@ from __future__ import annotations
 from backend.osint.normalization.models import QueryContext
 
 
+_QUEBEC_PUBLIC_TERMS = (
+    "disparition",
+    "fugue",
+    "derniere fois vue",
+    "appel a temoins",
+    "recherchee",
+)
+
+_YOUTH_PUBLIC_TERMS = (
+    "runaway",
+    "missing teen",
+    "missing youth",
+)
+
+
 def _clean_part(value: str | None) -> str:
     return " ".join(str(value or "").split())
 
@@ -51,6 +66,31 @@ def _date_markers(context: QueryContext) -> list[str]:
     return markers
 
 
+def _authority_marker(context: QueryContext) -> str:
+    return _clean_part(context.authority_name)
+
+
+def _is_quebec_context(context: QueryContext) -> bool:
+    province = _clean_part(context.province).lower()
+    return province in {"quebec", "québec"}
+
+
+def _localized_missing_terms(context: QueryContext) -> list[str]:
+    age = context.age
+
+    terms: list[str] = []
+    if _is_quebec_context(context):
+        terms.extend(_QUEBEC_PUBLIC_TERMS)
+        if age is not None and age < 18:
+            terms.extend(("adolescente", "adolescent", "mineure"))
+        return terms
+
+    if age is not None and age < 18:
+        terms.extend(_YOUTH_PUBLIC_TERMS)
+
+    return terms
+
+
 def build_public_query_plan(context: QueryContext, limit: int = 10) -> list[str]:
     """Build a small, reviewable set of public-search queries.
 
@@ -62,6 +102,9 @@ def build_public_query_plan(context: QueryContext, limit: int = 10) -> list[str]
     city = _clean_part(context.city)
     province = _clean_part(context.province)
     location_text = _clean_part(context.location_text)
+    authority_name = _authority_marker(context)
+    localized_terms = _localized_missing_terms(context)
+    prioritize_localized = _is_quebec_context(context)
     aliases = []
     for alias in context.aliases:
         cleaned = _clean_part(alias)
@@ -74,9 +117,23 @@ def build_public_query_plan(context: QueryContext, limit: int = 10) -> list[str]
     queries: list[str] = []
     seen: set[str] = set()
 
-    _push_query(queries, seen, f'"{name}"')
-    _push_query(queries, seen, f'"{name}" missing')
-    _push_query(queries, seen, f'"{name}" "last seen"')
+    # A single given name is highly ambiguous on the open web. Keep the
+    # first page of searches anchored to case facts so generic names do not
+    # flood the run with unrelated missing-person stories and namesakes.
+    ambiguous_name = len(name.split()) == 1
+    if not ambiguous_name:
+        _push_query(queries, seen, f'"{name}"')
+        _push_query(queries, seen, f'"{name}" missing')
+        _push_query(queries, seen, f'"{name}" "last seen"')
+    if prioritize_localized:
+        if authority_name:
+            _push_query(queries, seen, f'"{name}" "{authority_name}"')
+        for term in localized_terms:
+            _push_query(queries, seen, f'"{name}" {term}')
+            if city:
+                _push_query(queries, seen, f'"{name}" {term} "{city}"')
+            if len(queries) >= limit:
+                return queries[:limit]
     if location_text and location_text.lower() not in {city.lower(), province.lower()}:
         _push_query(queries, seen, f'"{name}" "{location_text}"')
     if city:
@@ -87,16 +144,35 @@ def build_public_query_plan(context: QueryContext, limit: int = 10) -> list[str]
     if city and province:
         _push_query(queries, seen, f'"{name}" "{city}" "{province}"')
 
+    if ambiguous_name:
+        _push_query(queries, seen, f'"{name}" "last seen"')
+        _push_query(queries, seen, f'"{name}" missing')
+        if len(queries) < limit and city:
+            _push_query(queries, seen, f'"{name}" "{city}"')
+
     if aliases:
         first_alias = aliases[0]
         _push_query(queries, seen, f'"{first_alias}"')
         if city:
             _push_query(queries, seen, f'"{first_alias}" "{city}"')
 
+    if authority_name and not prioritize_localized:
+        _push_query(queries, seen, f'"{name}" "{authority_name}"')
+
     if context.age is not None:
         _push_query(queries, seen, f'"{name}" {context.age}')
     if context.age is not None and city:
         _push_query(queries, seen, f'"{name}" {context.age} "{city}"')
+
+    if not prioritize_localized:
+        for term in localized_terms:
+            _push_query(queries, seen, f'"{name}" {term}')
+            if city:
+                _push_query(queries, seen, f'"{name}" {term} "{city}"')
+            if province:
+                _push_query(queries, seen, f'"{name}" {term} "{province}"')
+            if len(queries) >= limit:
+                return queries[:limit]
 
     for alias in aliases[1:]:
         _push_query(queries, seen, f'"{alias}"')
@@ -246,18 +322,32 @@ def build_news_query_plan(context: QueryContext, limit: int = 8) -> list[str]:
     city = _clean_part(context.city)
     province = _clean_part(context.province)
     location_text = _clean_part(context.location_text)
+    authority_name = _authority_marker(context)
+    localized_terms = _localized_missing_terms(context)
+    prioritize_localized = _is_quebec_context(context)
     date_markers = _date_markers(context)
 
     queries: list[str] = []
     seen: set[str] = set()
 
-    _push_query(queries, seen, f'"{primary_name}" missing')
-    _push_query(queries, seen, f'"{primary_name}" "last seen"')
+    ambiguous_name = len(primary_name.split()) == 1
+    if not ambiguous_name:
+        _push_query(queries, seen, f'"{primary_name}" missing')
+        _push_query(queries, seen, f'"{primary_name}" "last seen"')
     if location_text:
         _push_query(queries, seen, f'"{primary_name}" "{location_text}"')
     if city:
         _push_query(queries, seen, f'"{primary_name}" missing "{city}"')
         _push_query(queries, seen, f'"{primary_name}" "last seen" "{city}"')
+    if prioritize_localized:
+        if authority_name:
+            _push_query(queries, seen, f'"{primary_name}" "{authority_name}"')
+        for term in localized_terms:
+            _push_query(queries, seen, f'"{primary_name}" {term}')
+            if city:
+                _push_query(queries, seen, f'"{primary_name}" {term} "{city}"')
+            if len(queries) >= limit:
+                return queries[:limit]
     for marker in date_markers[:1]:
         _push_query(queries, seen, f'"{primary_name}" "{marker}"')
         if location_text:
@@ -266,6 +356,20 @@ def build_news_query_plan(context: QueryContext, limit: int = 8) -> list[str]:
             _push_query(queries, seen, f'"{primary_name}" "{city}" "{marker}"')
     if province:
         _push_query(queries, seen, f'"{primary_name}" missing "{province}"')
+    if authority_name and not prioritize_localized:
+        _push_query(queries, seen, f'"{primary_name}" "{authority_name}"')
+
+    if ambiguous_name:
+        _push_query(queries, seen, f'"{primary_name}" "last seen"')
+        _push_query(queries, seen, f'"{primary_name}" missing')
+
+    if not prioritize_localized:
+        for term in localized_terms:
+            _push_query(queries, seen, f'"{primary_name}" {term}')
+            if city:
+                _push_query(queries, seen, f'"{primary_name}" {term} "{city}"')
+            if len(queries) >= limit:
+                return queries[:limit]
 
     for alias in names[1:]:
         _push_query(queries, seen, f'"{alias}" missing')

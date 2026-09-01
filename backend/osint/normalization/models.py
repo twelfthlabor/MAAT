@@ -23,6 +23,7 @@ class QueryContext:
     case_reference_url: str | None = None
     source_urls: list[str] = field(default_factory=list)
     image_urls: list[str] = field(default_factory=list)
+    usernames: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
