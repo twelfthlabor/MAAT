@@ -8,6 +8,7 @@ questions separate and can operate on ORM objects or serialized lead mappings.
 from __future__ import annotations
 
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 
 _SIGHTING_TERMS = (
@@ -84,6 +85,9 @@ def assess_lead(lead: Any) -> dict[str, Any]:
     review_status = str(_get(lead, "review_status", "unreviewed") or "unreviewed").lower()
     location_text = _get(lead, "location_text")
     has_coordinates = _get(lead, "latitude") is not None and _get(lead, "longitude") is not None
+    source_url = str(_get(lead, "source_url", "") or "").strip()
+    parsed_source = urlparse(source_url)
+    is_source_backed = parsed_source.scheme in {"http", "https"} and bool(parsed_source.netloc)
 
     machine_sighting = "machine-extracted sighting location (unverified):" in rationale_blob
     explicit_sighting = machine_sighting or any(term in text_blob for term in _SIGHTING_TERMS)
@@ -104,12 +108,16 @@ def assess_lead(lead: Any) -> dict[str, Any]:
     elif tool_only:
         evidence_type = "research_tool"
         evidence_label = "Research or reporting tool"
-    elif explicit_sighting and location_text and not identity_ambiguous:
+    elif explicit_sighting and location_text and not identity_ambiguous and is_source_backed:
         evidence_type = "reported_sighting"
         evidence_label = "Reported sighting location"
     elif explicit_sighting and location_text:
         evidence_type = "location_mention"
-        evidence_label = "Possible namesake location mention"
+        evidence_label = (
+            "Possible namesake location mention"
+            if identity_ambiguous
+            else "Unattributed sighting mention"
+        )
     elif location_text:
         evidence_type = "location_mention"
         evidence_label = "Location mention"
@@ -154,6 +162,8 @@ def assess_lead(lead: Any) -> dict[str, Any]:
         actionability = min(actionability, 10)
     if identity_ambiguous:
         actionability = min(actionability, 20)
+    if explicit_sighting and not is_source_backed:
+        actionability = min(actionability, 30)
 
     relevance = _get(lead, "confidence")
     if relevance is not None and source_kind != "official":
@@ -236,6 +246,7 @@ def assess_lead(lead: Any) -> dict[str, Any]:
         "location_confidence": location_confidence,
         "location_precision": location_precision,
         "has_coordinates": has_coordinates,
+        "is_source_backed": is_source_backed,
         "next_step": next_step,
         "extracted_details": extracted_details,
     }

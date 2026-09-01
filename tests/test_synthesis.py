@@ -49,6 +49,8 @@ def test_geographic_patterns_accept_reported_sighting_candidates():
         {
             "lead_type": "sighting-trace",
             "source_kind": "clear-web",
+            "source_url": f"https://source-{index}.example/report",
+            "review_status": "credible" if index == 0 else "unreviewed",
             "title": f"Synthetic subject reportedly spotted near station {index}",
             "location_text": "Example Station",
             "latitude": 43.2 + index * 0.001,
@@ -63,4 +65,22 @@ def test_geographic_patterns_accept_reported_sighting_candidates():
 
     patterns = _detect_geographic_patterns(leads, 43.1, -79.1)
 
-    assert any(pattern["type"] == "geographic-cluster" for pattern in patterns)
+    assert any(pattern["type"] == "corroborated-location" for pattern in patterns)
+
+
+def test_geographic_patterns_reject_duplicate_domain_corroboration():
+    leads = [
+        {
+            "lead_type": "sighting-trace",
+            "source_kind": "clear-web",
+            "source_url": f"https://same.example/report/{index}",
+            "review_status": "credible",
+            "title": "Synthetic subject reportedly spotted near station",
+            "location_text": "Example Station",
+            "latitude": 43.2 + index * 0.001,
+            "longitude": -79.2,
+        }
+        for index in range(2)
+    ]
+
+    assert _detect_geographic_patterns(leads, 43.1, -79.1) == []

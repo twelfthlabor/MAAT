@@ -1,0 +1,108 @@
+{
+  "case": {
+    "id": 999999,
+    "name": "Synthetic CTF Subject",
+    "age": 24,
+    "city": "Origin City",
+    "province": "Example Province",
+    "latitude": 44.0000,
+    "longitude": -80.0000,
+    "missing_since": "2026-08-25T12:00:00+00:00"
+  },
+  "leads": [
+    {
+      "id": 1,
+      "lead_type": "official-last-seen",
+      "category": "official-last-seen",
+      "source_kind": "official",
+      "source_name": "Synthetic Challenge Authority",
+      "source_url": "https://authority.example/case-999999",
+      "title": "Official last-known location for Synthetic CTF Subject",
+      "content_excerpt": "The challenge begins in Origin City.",
+      "location_text": "Origin City",
+      "latitude": 44.0000,
+      "longitude": -80.0000,
+      "confidence": 0.99,
+      "review_status": "credible",
+      "published_at": "2026-08-25T12:00:00+00:00",
+      "rationale": []
+    },
+    {
+      "id": 2,
+      "lead_type": "sighting-trace",
+      "category": "archive-capture",
+      "source_kind": "archive",
+      "source_name": "Synthetic Web Archive",
+      "source_url": "https://archive-one.example/captures/subject-update",
+      "title": "Synthetic CTF Subject from Origin City reportedly spotted near Aurora Transit Terminal",
+      "content_excerpt": "A dated capture reports seeing the full-name subject at Aurora Transit Terminal after the challenge start.",
+      "location_text": "Aurora Transit Terminal, Northstar",
+      "latitude": 43.6500,
+      "longitude": -79.3800,
+      "confidence": 0.91,
+      "review_status": "credible",
+      "published_at": "2026-08-30T14:00:00+00:00",
+      "rationale": [
+        "Machine-extracted sighting location (unverified): Aurora Transit Terminal, Northstar",
+        "Geocode precision: street_or_landmark"
+      ]
+    },
+    {
+      "id": 3,
+      "lead_type": "sighting-trace",
+      "category": "news-monitoring",
+      "source_kind": "clear-web",
+      "source_name": "Synthetic Northstar News",
+      "source_url": "https://northstar-news.example/local/terminal-report",
+      "title": "Synthetic CTF Subject from Origin City may have been seen at Aurora Transit Terminal",
+      "content_excerpt": "An independent public report places the full-name subject near the same terminal and date.",
+      "location_text": "Aurora Transit Terminal, Northstar",
+      "latitude": 43.6508,
+      "longitude": -79.3795,
+      "confidence": 0.86,
+      "review_status": "unreviewed",
+      "published_at": "2026-08-30T15:10:00+00:00",
+      "rationale": [
+        "Machine-extracted sighting location (unverified): Aurora Transit Terminal, Northstar",
+        "Geocode precision: street_or_landmark"
+      ]
+    },
+    {
+      "id": 4,
+      "lead_type": "news-article",
+      "category": "news-monitoring",
+      "source_kind": "clear-web",
+      "source_name": "Synthetic Distractor News",
+      "source_url": "https://distractor.example/namesake",
+      "title": "Synthetic namesake reportedly spotted near Different Station",
+      "content_excerpt": "This report lacks the full name, Origin City, and challenge anchors.",
+      "location_text": "Different Station",
+      "latitude": 45.5000,
+      "longitude": -73.6000,
+      "confidence": 0.72,
+      "review_status": "unreviewed",
+      "published_at": "2026-08-30T16:00:00+00:00",
+      "rationale": [
+        "Possible namesake: the returned article lacks matching official anchors."
+      ]
+    },
+    {
+      "id": 5,
+      "lead_type": "analyst-action",
+      "category": "username-research",
+      "source_kind": "tooling",
+      "source_name": "Sherlock",
+      "source_url": "https://sherlockproject.xyz/",
+      "title": "Run bounded username checks for the synthetic handle",
+      "location_text": "Different Station",
+      "confidence": 0.95,
+      "review_status": "unreviewed",
+      "rationale": []
+    }
+  ],
+  "expected": {
+    "location": "Aurora Transit Terminal, Northstar",
+    "minimum_independent_sources": 2,
+    "flag": "MAAT{source_backed_location_convergence}"
+  }
+}

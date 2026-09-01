@@ -7,6 +7,7 @@ def test_reported_sighting_is_distinct_from_relevance_and_remains_unverified():
     lead = {
         "lead_type": "news-article",
         "source_kind": "clear-web",
+        "source_url": "https://news.example/report",
         "title": "Missing teen reportedly spotted near Central Station",
         "summary": "A witness report describes the station area.",
         "location_text": "Central Station, Toronto",
@@ -28,6 +29,25 @@ def test_reported_sighting_is_distinct_from_relevance_and_remains_unverified():
     assert assessment["location_precision"] == "neighbourhood"
     assert assessment["actionability_score"] >= 65
     assert assessment["is_location_candidate"] is True
+    assert assessment["is_source_backed"] is True
+
+
+def test_unattributed_sighting_cannot_become_a_location_candidate():
+    assessment = assess_lead({
+        "lead_type": "sighting-trace",
+        "source_kind": "clear-web",
+        "title": "Synthetic subject reportedly spotted near Central Station",
+        "location_text": "Central Station",
+        "latitude": 43.645,
+        "longitude": -79.38,
+        "review_status": "credible",
+    })
+
+    assert assessment["evidence_type"] == "location_mention"
+    assert assessment["evidence_label"] == "Unattributed sighting mention"
+    assert assessment["is_source_backed"] is False
+    assert assessment["is_location_candidate"] is False
+    assert assessment["actionability_score"] <= 30
 
 
 def test_research_tool_is_not_misrepresented_as_evidence():
@@ -68,6 +88,7 @@ def test_manual_review_changes_state_without_claiming_source_verification():
         {
             "lead_type": "web-mention",
             "source_kind": "clear-web",
+            "source_url": "https://example.test/report",
             "title": "Report says the subject was sighted",
             "location_text": "Levis",
             "review_status": "credible",
@@ -84,6 +105,7 @@ def test_low_relevance_result_cannot_rank_high_on_generic_case_city():
         {
             "lead_type": "web-mention",
             "source_kind": "clear-web",
+            "source_url": "https://news.example/namesake",
             "title": "Unrelated school yearbook",
             "location_text": "Red Deer",
             "confidence": 0.12,

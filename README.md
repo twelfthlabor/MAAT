@@ -10,6 +10,7 @@ Live dashboard: [maat-cse-lover.vercel.app](https://maat-cse-lover.vercel.app/)
 - Searches official sources, Canadian news, GDELT, Reddit, Wayback Machine, Arquivo.pt, and public profile indexes.
 - Uses Sherlock and WhatsMyName for bounded username pivots from discovered public profile URLs.
 - Scores, deduplicates, enriches, maps, and synthesizes source-linked leads.
+- Narrows locations only when independent source domains converge and at least one report is reviewed.
 - Produces review queues, timelines, clusters, and authority-ready briefs.
 
 ## Safety
@@ -74,6 +75,7 @@ python -m scripts.sync_cases
 python -m scripts.export_public_data
 python -m scripts.investigate_case <case_id>
 python -m scripts.generate_intel_report <case_id>
+python -m scripts.validate_ctf_fixture
 python -m pytest -q
 ```
 

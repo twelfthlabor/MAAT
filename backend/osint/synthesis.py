@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from backend.osint.lead_analysis import assess_lead
+from backend.osint.location_evidence import evaluate_location_evidence
 from shared.utils.geo import haversine_km
 from shared.utils.text import token_similarity
 
@@ -370,76 +371,35 @@ def _detect_geographic_patterns(
     case_lon: float | None,
 ) -> list[dict]:
     """Detect geographic clusters and movement patterns."""
-    patterns: list[dict] = []
-    # Coordinates attached to analyst tools, the official last-known point, or
-    # incidental place mentions are not new locating evidence.
-    geo_leads = [
-        lead for lead in leads
-        if lead.get("latitude") is not None
-        and lead.get("longitude") is not None
-        and _analysis(lead).get("is_location_candidate")
-    ]
+    report = evaluate_location_evidence(leads)
+    best = report.get("best_candidate")
+    if not report["sufficient"] or not best:
+        return []
 
-    if not geo_leads:
-        return patterns
+    distance_from_case = None
+    if (
+        case_lat is not None and case_lon is not None
+        and best.get("latitude") is not None and best.get("longitude") is not None
+    ):
+        distance_from_case = haversine_km(
+            case_lat, case_lon, best["latitude"], best["longitude"],
+        )
 
-    # Cluster by proximity (simple grid-based)
-    geo_clusters: dict[str, list[dict]] = defaultdict(list)
-    for lead in geo_leads:
-        # Round to ~10km grid
-        grid_key = f"{round(lead['latitude'], 1)},{round(lead['longitude'], 1)}"
-        geo_clusters[grid_key].append(lead)
-
-    for grid_key, cluster in geo_clusters.items():
-        if len(cluster) < 2:
-            continue
-        avg_lat = sum(l["latitude"] for l in cluster) / len(cluster)
-        avg_lon = sum(l["longitude"] for l in cluster) / len(cluster)
-        loc_texts = list({l.get("location_text", "Unknown") for l in cluster if l.get("location_text")})
-
-        distance_from_case = None
-        if case_lat and case_lon:
-            distance_from_case = haversine_km(case_lat, case_lon, avg_lat, avg_lon)
-
-        patterns.append({
-            "type": "geographic-cluster",
-            "label": f"{len(cluster)} leads clustered near {', '.join(loc_texts[:2]) or grid_key}",
-            "lead_count": len(cluster),
-            "locations": loc_texts,
-            "center_lat": round(avg_lat, 4),
-            "center_lon": round(avg_lon, 4),
-            "distance_from_case_km": distance_from_case,
-            "significance": "high" if len(cluster) >= 3 else "medium",
-        })
-
-    # Detect spread from case origin
-    if case_lat and case_lon and len(geo_leads) >= 2:
-        distances = []
-        for lead in geo_leads:
-            d = haversine_km(case_lat, case_lon, lead["latitude"], lead["longitude"])
-            distances.append(d)
-        avg_dist = sum(distances) / len(distances)
-        max_dist = max(distances)
-
-        if max_dist > 500:
-            patterns.append({
-                "type": "wide-dispersal",
-                "label": f"Leads span up to {max_dist:.0f}km from case origin — cross-regional investigation may be needed",
-                "avg_distance_km": round(avg_dist, 1),
-                "max_distance_km": round(max_dist, 1),
-                "significance": "high",
-            })
-        elif max_dist > 100:
-            patterns.append({
-                "type": "regional-spread",
-                "label": f"Leads concentrated within {max_dist:.0f}km radius — regional focus recommended",
-                "avg_distance_km": round(avg_dist, 1),
-                "max_distance_km": round(max_dist, 1),
-                "significance": "medium",
-            })
-
-    patterns.sort(key=lambda p: {"high": 0, "medium": 1, "low": 2}.get(p.get("significance", "low"), 2))
-    return patterns
+    return [{
+        "type": "corroborated-location",
+        "label": (
+            f"{best['independent_source_count']} independent sources converge near "
+            f"{best.get('location') or 'the reported coordinates'}"
+        ),
+        "lead_count": best["lead_count"],
+        "independent_source_count": best["independent_source_count"],
+        "reviewed_source_count": best["reviewed_source_count"],
+        "locations": [best["location"]] if best.get("location") else [],
+        "center_lat": best.get("latitude"),
+        "center_lon": best.get("longitude"),
+        "distance_from_case_km": distance_from_case,
+        "significance": report["confidence"],
+    }]
 
 
 # ---------------------------------------------------------------------------

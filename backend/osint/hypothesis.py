@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from backend.osint.lead_analysis import assess_lead
+from backend.osint.location_evidence import evaluate_location_evidence
 from shared.utils.geo import haversine_km
 
 
@@ -298,6 +299,7 @@ def _analyze_lead_evidence(
             signals["locations_mentioned"].append(loc.strip())
 
     signals["source_diversity"] = list(signals["source_diversity"])
+    signals["location_evidence"] = evaluate_location_evidence(signals["location_candidates"])
     return signals
 
 
@@ -528,24 +530,32 @@ def _build_geographic_assessment(
 
     # Behavioral scenarios are not location evidence. Only source-backed
     # reported-sighting candidates may narrow the geographic assessment.
-    sighting_locs = _extract_sighting_locations(signals)
-    if sighting_locs:
-        # Sighting data overrides scenario-based guessing
-        loc_str = ", ".join(sighting_locs[:5])
-        zone = f"Unverified sighting report(s) mention: {loc_str}. Verify each source before comparing corridors with {case_city or 'the last known location'}."
-        confidence = "high" if len(sighting_locs) >= 2 else "medium"
+    evidence = signals.get("location_evidence") or evaluate_location_evidence(
+        signals.get("location_candidates", [])
+    )
+    best = evidence.get("best_candidate")
+    if evidence["sufficient"] and best:
+        zone = (
+            f"Corroborated public reports converge near {best.get('location') or 'the reported coordinates'} "
+            f"across {best['independent_source_count']} independent source domains. "
+            "Treat this as an investigative lead, not a confirmed current location."
+        )
+        confidence = evidence["confidence"]
     else:
         baseline = case_city or case_province or "the reported area"
         zone = (
             "Insufficient source-backed post-disappearance location evidence to narrow the search. "
-            f"Retain {baseline} only as the official baseline."
+            f"Retain {baseline} only as the official baseline. {evidence['reason']}"
         )
         confidence = "low"
 
     return GeographicAssessment(
         probable_zone=zone,
-        description=f"Based on {len(unique_locations)} unique location mentions and {len(infrastructure)} nearby infrastructure points.",
-        supporting_leads=len(signals.get("sighting_leads", [])),
+        description=(
+            f"Based on {evidence['candidate_count']} attributable location candidate(s), "
+            f"{len(unique_locations)} unique location mentions, and {len(infrastructure)} nearby infrastructure points."
+        ),
+        supporting_leads=best["lead_count"] if evidence["sufficient"] and best else 0,
         nearby_infrastructure=infrastructure,
         confidence=confidence,
     )
@@ -592,10 +602,12 @@ def _build_conclusion(
     if case_city:
         search_areas.append(f"{case_city} and immediate surroundings (last known location)")
     # Add sighting-derived locations to search areas
-    sighting_locations = _extract_sighting_locations(signals)
+    location_evidence = signals.get("location_evidence") or {}
+    best_location = location_evidence.get("best_candidate") if location_evidence.get("sufficient") else None
+    sighting_locations = [best_location["location"]] if best_location and best_location.get("location") else []
     if sighting_locations:
-        search_areas.append(f"Unverified reported sighting area(s): {', '.join(sighting_locations[:5])}")
-    if sighting_locations and signals["has_travel_indicators"]:
+        search_areas.append(f"Corroborated reported sighting area: {sighting_locations[0]}")
+    if best_location and signals["has_travel_indicators"]:
         search_areas.append("Highway rest stops, gas stations, and transit hubs along the travel route")
 
     # Critical actions
@@ -732,9 +744,9 @@ def generate_hypothesis(
         quality_notes.append("Low source diversity — corroboration is limited.")
     if not signals["has_social_profiles"]:
         quality_notes.append("No social media profiles found — digital footprint analysis incomplete.")
-    if not signals["location_candidates"]:
+    if not signals.get("location_evidence", {}).get("sufficient"):
         quality_notes.append(
-            "No source-backed post-disappearance location candidate was found; geographic conclusions are unsupported."
+            "No independently corroborated post-disappearance location was found; geographic conclusions are unsupported."
         )
     data_quality = " ".join(quality_notes) if quality_notes else "Adequate data volume for preliminary assessment."
 
