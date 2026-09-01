@@ -10,6 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from backend.osint.lead_analysis import assess_lead
 from shared.utils.geo import haversine_km
 from shared.utils.text import token_similarity
 
@@ -96,6 +97,12 @@ def _text_key(lead: dict) -> str:
     ])).strip().lower()
 
 
+def _analysis(lead: dict) -> dict:
+    """Return supplied evidence semantics or derive them for legacy callers."""
+
+    return lead.get("analysis") or assess_lead(lead)
+
+
 def _cluster_leads(leads: list[dict]) -> list[LeadCluster]:
     """Group leads into thematic clusters based on text similarity and geography."""
     if not leads:
@@ -166,7 +173,8 @@ def _cluster_leads(leads: list[dict]) -> list[LeadCluster]:
             # Pick best location from cluster
             best_loc = next(
                 (l for l in sorted(group, key=lambda x: x.get("confidence", 0), reverse=True)
-                 if l.get("location_text")),
+                 if l.get("location_text")
+                 and _analysis(l).get("evidence_type") != "research_tool"),
                 None,
             )
 
@@ -363,7 +371,14 @@ def _detect_geographic_patterns(
 ) -> list[dict]:
     """Detect geographic clusters and movement patterns."""
     patterns: list[dict] = []
-    geo_leads = [l for l in leads if l.get("latitude") and l.get("longitude")]
+    # Coordinates attached to analyst tools, the official last-known point, or
+    # incidental place mentions are not new locating evidence.
+    geo_leads = [
+        lead for lead in leads
+        if lead.get("latitude") is not None
+        and lead.get("longitude") is not None
+        and _analysis(lead).get("is_location_candidate")
+    ]
 
     if not geo_leads:
         return patterns

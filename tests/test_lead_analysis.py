@@ -46,6 +46,23 @@ def test_research_tool_is_not_misrepresented_as_evidence():
     assert "not evidence" in assessment["next_step"].lower()
 
 
+def test_research_tool_with_prefilled_city_is_still_not_location_evidence():
+    assessment = assess_lead(
+        {
+            "lead_type": "analyst-action",
+            "source_kind": "tooling",
+            "title": "Open a public people-search query",
+            "location_text": "Example City",
+            "latitude": 43.1,
+            "longitude": -79.1,
+            "rationale": [],
+        }
+    )
+
+    assert assessment["evidence_type"] == "research_tool"
+    assert assessment["is_location_candidate"] is False
+
+
 def test_manual_review_changes_state_without_claiming_source_verification():
     assessment = assess_lead(
         {
@@ -77,3 +94,23 @@ def test_low_relevance_result_cannot_rank_high_on_generic_case_city():
 
     assert assessment["evidence_type"] == "location_mention"
     assert assessment["actionability_score"] <= 15
+
+
+def test_possible_namesake_cannot_become_a_location_candidate():
+    assessment = assess_lead(
+        {
+            "lead_type": "news-article",
+            "source_kind": "clear-web",
+            "title": "Synthetic namesake reportedly spotted near a station",
+            "location_text": "Different City",
+            "confidence": 0.7,
+            "rationale": [
+                "Ambiguous single-name result lacks case geography, authority, or two distinctive official anchors."
+            ],
+        }
+    )
+
+    assert assessment["evidence_type"] == "location_mention"
+    assert assessment["evidence_label"] == "Possible namesake location mention"
+    assert assessment["is_location_candidate"] is False
+    assert assessment["actionability_score"] <= 20

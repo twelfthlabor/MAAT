@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+from backend.osint.lead_analysis import assess_lead
 from shared.utils.geo import haversine_km
 
 
@@ -198,6 +199,7 @@ def _analyze_lead_evidence(
         "social_media_leads": [],
         "news_leads": [],
         "sighting_leads": [],
+        "location_candidates": [],
         "family_leads": [],
         "community_leads": [],
         "network_leads": [],
@@ -227,6 +229,7 @@ def _analyze_lead_evidence(
         title = (lead.get("title") or "").lower()
         excerpt = (lead.get("content_excerpt") or "").lower()
         text = f"{title} {excerpt}"
+        analysis = lead.get("analysis") or assess_lead(lead)
 
         signals["lead_categories"][category] += 1
         signals["lead_types"][lead_type] += 1
@@ -272,9 +275,14 @@ def _analyze_lead_evidence(
                 and (case_city or "").lower() in text
             )
         )
-        if case_linked and any(term in text for term in current_sighting_terms):
+        if case_linked and (
+            analysis.get("evidence_type") == "reported_sighting"
+            or any(term in text for term in current_sighting_terms)
+        ):
             signals["has_sightings"] = True
             signals["sighting_leads"].append(lead)
+            if analysis.get("is_location_candidate"):
+                signals["location_candidates"].append(lead)
         if "search party" in text or "volunteer" in text:
             signals["has_community_search"] = True
         if any(kw in text for kw in ("bus", "greyhound", "train", "travel", "ride", "highway")):
@@ -284,7 +292,9 @@ def _analyze_lead_evidence(
 
         # Location extraction
         loc = lead.get("location_text")
-        if loc and loc.strip():
+        if loc and loc.strip() and analysis.get("evidence_type") in {
+            "reported_sighting", "official_last_known"
+        }:
             signals["locations_mentioned"].append(loc.strip())
 
     signals["source_diversity"] = list(signals["source_diversity"])
@@ -296,6 +306,10 @@ def _extract_sighting_locations(signals: dict[str, Any]) -> list[str]:
     locations: list[str] = []
     seen = set()
     for lead in signals.get("sighting_leads", []):
+        direct_location = str(lead.get("location_text") or "").strip()
+        if direct_location and direct_location.lower() not in seen:
+            seen.add(direct_location.lower())
+            locations.append(direct_location)
         for r in lead.get("rationale", []):
             r_str = str(r)
             if (
@@ -501,7 +515,6 @@ def _build_geographic_assessment(
 ) -> GeographicAssessment:
     """Assess where the person most likely is."""
 
-    primary = scenarios[0].name if scenarios else "Unknown"
     locations = signals.get("locations_mentioned", [])
     unique_locations = list(set(locations))
 
@@ -513,37 +526,20 @@ def _build_geographic_assessment(
         if dist is not None and dist < 150:
             infrastructure.append(f"{ct}: {label} ({dist:.0f} km)")
 
-    # Determine probable zone based on sighting data and primary scenario
+    # Behavioral scenarios are not location evidence. Only source-backed
+    # reported-sighting candidates may narrow the geographic assessment.
     sighting_locs = _extract_sighting_locations(signals)
     if sighting_locs:
         # Sighting data overrides scenario-based guessing
         loc_str = ", ".join(sighting_locs[:5])
         zone = f"Unverified sighting report(s) mention: {loc_str}. Verify each source before comparing corridors with {case_city or 'the last known location'}."
         confidence = "high" if len(sighting_locs) >= 2 else "medium"
-    elif "Runaway" in primary:
-        if signals["has_travel_indicators"]:
-            zone = f"Likely beyond {case_city or 'origin'} — travel indicators suggest inter-city movement. Check bus stations, shelters, and friends' addresses in nearby cities."
-            confidence = "medium"
-        else:
-            zone = f"Likely still within {case_city or case_province or 'the region'} — staying with friends, at shelters, or in familiar locations (malls, parks, community centers)."
-            confidence = "medium"
-    elif "Exploitation" in primary:
-        zone = f"May have been moved from {case_city or 'origin'}. Check nearby urban centers, transit corridors, and border crossings. Shelters and outreach services should be alerted."
-        confidence = "low"
-    elif "Custodial" in primary:
-        zone = f"Likely with a family member — check addresses of non-custodial parents and extended family in {case_province or 'the province'} and adjacent provinces."
-        confidence = "medium"
-    elif "Voluntary" in primary:
-        zone = f"Likely in another city — the subject has the means to sustain a departure. Check employment records, social media activity, and financial traces."
-        confidence = "low"
-    elif "Abduction" in primary:
-        zone = "Immediate area and transit corridors should be priority. Time-sensitive — widening search radius is critical."
-        confidence = "low"
-    elif "Medical Emergency" in primary:
-        zone = f"Subject may be stranded or disoriented along travel route from {case_city or 'origin'}. Check hospitals, care facilities, and roadside stops. Alert local pharmacies if medication needs are known."
-        confidence = "medium"
     else:
-        zone = f"Insufficient evidence to narrow geographic probability. Focus on {case_city or case_province or 'the reported area'} and expand based on new leads."
+        baseline = case_city or case_province or "the reported area"
+        zone = (
+            "Insufficient source-backed post-disappearance location evidence to narrow the search. "
+            f"Retain {baseline} only as the official baseline."
+        )
         confidence = "low"
 
     return GeographicAssessment(
@@ -599,17 +595,8 @@ def _build_conclusion(
     sighting_locations = _extract_sighting_locations(signals)
     if sighting_locations:
         search_areas.append(f"Unverified reported sighting area(s): {', '.join(sighting_locations[:5])}")
-    if signals["has_travel_indicators"]:
+    if sighting_locations and signals["has_travel_indicators"]:
         search_areas.append("Highway rest stops, gas stations, and transit hubs along the travel route")
-    # Age-appropriate shelter recommendations
-    if case_age is not None and case_age >= 65:
-        search_areas.append("Hospitals, care facilities, and senior services in the region")
-    elif case_age is not None and case_age < 18:
-        search_areas.append("Youth shelters and outreach services in the province")
-    else:
-        search_areas.append("Shelters, hospitals, and outreach services in the province")
-    for geo in (geo_assessment.nearby_infrastructure or [])[:3]:
-        search_areas.append(f"Near {geo}")
 
     # Critical actions
     critical_actions: list[str] = []
@@ -745,6 +732,10 @@ def generate_hypothesis(
         quality_notes.append("Low source diversity — corroboration is limited.")
     if not signals["has_social_profiles"]:
         quality_notes.append("No social media profiles found — digital footprint analysis incomplete.")
+    if not signals["location_candidates"]:
+        quality_notes.append(
+            "No source-backed post-disappearance location candidate was found; geographic conclusions are unsupported."
+        )
     data_quality = " ".join(quality_notes) if quality_notes else "Adequate data volume for preliminary assessment."
 
     return HypothesisReport(

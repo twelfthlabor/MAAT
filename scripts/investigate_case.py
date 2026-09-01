@@ -37,6 +37,7 @@ from backend.models.case import Case, CasePhoto, ResourceLink, SourceRecord
 from backend.models.investigation import InvestigationRun, Lead
 from backend.osint.aggregation import merge_normalized_leads
 from backend.osint.connectors.registry import enabled_connectors
+from backend.osint.lead_analysis import assess_lead
 from backend.osint.normalization.models import QueryContext
 from backend.osint.scoring.lead_scoring import score_lead
 from backend.osint.synthesis import synthesize_investigation
@@ -506,6 +507,7 @@ async def investigate_case(session, case: Case) -> InvestigationRun:
     _print_section("MAAT INTELLIGENCE SYNTHESIS")
     lead_dicts = [
         {
+            "id": l.id,
             "title": l.title,
             "confidence": l.confidence,
             "lead_type": l.lead_type,
@@ -522,6 +524,7 @@ async def investigate_case(session, case: Case) -> InvestigationRun:
             "rationale": l.rationale,
             "source_trust": l.source_trust,
             "corroboration_count": l.corroboration_count,
+            "analysis": assess_lead(l),
         }
         for l in sorted_leads
     ]
@@ -749,6 +752,7 @@ async def investigate_case(session, case: Case) -> InvestigationRun:
                 "location": l.location_text,
                 "excerpt": l.content_excerpt[:300] if l.content_excerpt else None,
                 "rationale": l.rationale,
+                "analysis": assess_lead(l),
             }
             for i, l in enumerate(sorted_leads)
         ],

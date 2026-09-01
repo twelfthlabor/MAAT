@@ -87,21 +87,32 @@ def assess_lead(lead: Any) -> dict[str, Any]:
 
     machine_sighting = "machine-extracted sighting location (unverified):" in rationale_blob
     explicit_sighting = machine_sighting or any(term in text_blob for term in _SIGHTING_TERMS)
+    identity_ambiguous = any(
+        marker in rationale_blob
+        for marker in (
+            "possible namesake",
+            "ambiguous single-name result",
+            "likely about a different person",
+        )
+    )
     official_last_known = lead_type == "official-last-seen"
     tool_only = lead_type in {"analyst-action", "tip-line", "portal-link", "reverse-image-link"}
 
     if official_last_known:
         evidence_type = "official_last_known"
         evidence_label = "Official last-known location"
-    elif explicit_sighting and location_text:
-        evidence_type = "reported_sighting"
-        evidence_label = "Reported sighting location"
-    elif location_text:
-        evidence_type = "location_mention"
-        evidence_label = "Location mention"
     elif tool_only:
         evidence_type = "research_tool"
         evidence_label = "Research or reporting tool"
+    elif explicit_sighting and location_text and not identity_ambiguous:
+        evidence_type = "reported_sighting"
+        evidence_label = "Reported sighting location"
+    elif explicit_sighting and location_text:
+        evidence_type = "location_mention"
+        evidence_label = "Possible namesake location mention"
+    elif location_text:
+        evidence_type = "location_mention"
+        evidence_label = "Location mention"
     else:
         evidence_type = "context_only"
         evidence_label = "Context only"
@@ -141,6 +152,8 @@ def assess_lead(lead: Any) -> dict[str, Any]:
         actionability += 8
     if any(term in text_blob for term in _AMPLIFICATION_TERMS) and evidence_type == "context_only":
         actionability = min(actionability, 10)
+    if identity_ambiguous:
+        actionability = min(actionability, 20)
 
     relevance = _get(lead, "confidence")
     if relevance is not None and source_kind != "official":
@@ -175,7 +188,11 @@ def assess_lead(lead: Any) -> dict[str, Any]:
     else:
         location_confidence = 0.0
 
-    if evidence_type == "reported_sighting":
+    if identity_ambiguous:
+        next_step = (
+            "Resolve the identity conflict before using this location; the returned text may describe a namesake."
+        )
+    elif evidence_type == "reported_sighting":
         next_step = (
             "Verify that the report describes the subject, date, and place; compare distinctive details, "
             "then send the source URL and extracted facts to the investigating authority."
